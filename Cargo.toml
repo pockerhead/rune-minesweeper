@@ -1,0 +1,46 @@
+[package]
+name = "mines-afloat"
+version = "0.1.0"
+edition = "2024"
+description = "Minesweeper on a living sea: a native Rust game on the Rune GPU UI framework, with Jolt Physics buoyancy"
+license = "MIT"
+repository = "https://github.com/pockerhead/rune-minesweeper"
+readme = "README.md"
+keywords = ["game", "minesweeper", "wgpu", "rune", "physics"]
+categories = ["games"]
+
+[[bin]]
+name = "mines-afloat"
+path = "src/main.rs"
+
+[dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+oxijolt = "1.5"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = { version = "0.30", features = ["bytemuck"] }
+fastrand = "2"
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal"] }
+
+# Rune is pre-release: pinned to a revision of its `dev` branch. Rune patches a few crates with
+# its own versions (vendor/ in its repository) and asks apps built on it to apply the same patches.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
+
+[profile.dev]
+debug = "line-tables-only"
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+codegen-units = 16

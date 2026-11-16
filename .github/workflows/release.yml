@@ -1,0 +1,149 @@
+name: release
+
+# Builds Mines Afloat for Windows, Linux and macOS and publishes a GitHub release when a
+# `v*` tag is pushed (or by hand from the Actions tab).
+#
+# Every artifact gets a SHA-256 checksum and a signed build-provenance attestation (Sigstore,
+# free, verifiable with `gh attestation verify <file> --repo <owner>/<repo>`).
+# Platform code signing runs only when its secrets are set:
+#   macOS:   MACOS_CERT_P12 (base64 Developer ID Application .p12), MACOS_CERT_PASSWORD,
+#            MACOS_SIGN_IDENTITY, and for notarisation APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD.
+#            Without them the binary is ad-hoc signed (enough to run on Apple Silicon after
+#            clearing quarantine).
+#   Windows: WINDOWS_CERT_PFX (base64 .pfx), WINDOWS_CERT_PASSWORD.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: mines-afloat
+
+jobs:
+  build:
+    name: build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: .exe }
+          - { name: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: "" }
+          - { name: macos-arm64, os: macos-14, target: aarch64-apple-darwin, exe: "" }
+          - { name: macos-x86_64, os: macos-13, target: x86_64-apple-darwin, exe: "" }
+    runs-on: ${{ matrix.os }}
+    env:
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libvulkan-dev
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          BIN_PATH="target/${{ matrix.target }}/release/$BIN"
+          if [ -n "$MACOS_CERT_P12" ]; then
+            KEYCHAIN="$RUNNER_TEMP/build.keychain"
+            echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p ci "$KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN"
+            security unlock-keychain -p ci "$KEYCHAIN"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+            security list-keychains -d user -s "$KEYCHAIN"
+            security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN"
+            codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$BIN_PATH"
+            if [ -n "$APPLE_ID" ]; then
+              ditto -c -k --keepParent "$BIN_PATH" "$RUNNER_TEMP/notarize.zip"
+              xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+            fi
+          else
+            codesign --force --sign - "$BIN_PATH"
+          fi
+          codesign --verify --verbose "$BIN_PATH"
+
+      - name: Sign (Windows)
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERT_PASSWORD /fd sha256 `
+            /tr http://timestamp.digicert.com /td sha256 "target\${{ matrix.target }}\release\$env:BIN.exe"
+
+      - name: Package
+        shell: bash
+        run: |
+          DIR="$BIN-${{ github.ref_name }}-${{ matrix.name }}"
+          mkdir -p "dist/$DIR"
+          cp "target/${{ matrix.target }}/release/$BIN${{ matrix.exe }}" "dist/$DIR/"
+          cp README.md LICENSE "dist/$DIR/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$DIR.zip" "$DIR" > /dev/null
+          else
+            tar czf "$DIR.tar.gz" "$DIR"
+          fi
+          rm -rf "$DIR"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

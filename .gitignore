@@ -1,0 +1,6 @@
+/target
+*.mp4
+*.png
+!docs/*.png
+!docs/*.gif
+/scratch
