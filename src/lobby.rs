@@ -115,6 +115,7 @@ impl Lobby {
     }
 
     /// The menu tile under world point (x, z), with where on it (-1 left edge .. 1 right edge).
+    /// A tile takes presses half way to its neighbours, so the gaps between tiles pick too.
     pub fn item_at(&self, x: f32, z: f32) -> Option<(usize, f32)> {
         self.tiles.iter().enumerate().find_map(|(k, t)| {
             if t.blown || t.body.fade.is_some() {
@@ -122,7 +123,7 @@ impl Lobby {
             }
             let p = position_of(&self.sea.world, t.body.id)?;
             let (dx, dz) = (x - p.x, z - p.z);
-            (dx.abs() < ITEM[0] * 0.5 && dz.abs() < ITEM[2] * 0.5).then_some((k, dx / (ITEM[0] * 0.5)))
+            (dx.abs() < ITEM[0] * 0.5 && dz.abs() < ITEM_GAP * 0.5).then_some((k, dx / (ITEM[0] * 0.5)))
         })
     }
 

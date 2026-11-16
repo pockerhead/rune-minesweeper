@@ -35,9 +35,10 @@ fn cloud_center(k: i32) -> vec3<f32> {
     return vec3<f32>(c.x, g.board.w + bob - rise, c.y);
 }
 
-// a camera-facing frame shared by all clouds, so every digit reads upright on screen
+// a camera-facing frame shared by all clouds, so every digit reads upright on screen; a pan
+// (g.info.yz) moves the camera without turning it, so the frame moves with it
 fn glyph_frame() -> mat3x3<f32> {
-    let f = normalize(g.cam.xyz - vec3<f32>(0.0, 0.0, 0.5));
+    let f = normalize(g.cam.xyz - vec3<f32>(g.info.y, 0.0, 0.5 + g.info.z));
     let r = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), f));
     let u = cross(f, r);
     return mat3x3<f32>(r, u, f);

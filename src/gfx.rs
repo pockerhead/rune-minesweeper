@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use rune::compose::{DeviceKey, Frame};
 use rune::render::EffectSite;
 
@@ -23,7 +23,8 @@ pub struct Globals {
     pub inv_view_proj: [[f32; 4]; 4],
     pub cam: [f32; 4],
     pub sun: [f32; 4],
-    /// x the cell under the pointer (-1 none), y and z unused, w status (0 play, 1 lost, 2 won).
+    /// x the cell under the pointer (-1 none), y and z the camera's pan (x, z), w status (0
+    /// play, 1 lost, 2 won).
     pub info: [f32; 4],
     /// The board's viewport in offscreen pixels: x, y, w, h (set by `Gpu::render`).
     pub viewport: [f32; 4],
@@ -90,19 +91,57 @@ impl Scene {
 pub struct Camera {
     pub view_proj: Mat4,
     pub eye: Vec3,
-    /// How far the camera is pulled back to fit a narrow board (1 at aspect 1.25 and wider).
+    /// How far the camera is pulled back: to fit a narrow board (1 at aspect 1.25 and wider),
+    /// divided by the zoom.
     pub back: f32,
+    /// How far the camera is moved over the water (x, z) from where the fit puts it.
+    pub pan: Vec2,
 }
 
-/// The fixed camera over a board of half-extents `half` (x, z) for an aspect ratio (w / h).
-pub fn camera(aspect: f32, half: (f32, f32)) -> Camera {
-    // framed for a 10 x 10 board in a 1.25 window, then pulled back to fit wider or deeper
-    let back = (half.1 / 5.0).max(half.0 / 5.0 * 1.25 / aspect).max(1.25 / aspect).max(0.85);
-    let eye = Vec3::new(0.0, 12.0, 8.6) * back;
-    let target = Vec3::new(0.0, -0.3, 0.55 * back);
+impl Camera {
+    /// The water point (x, z) under a point of the view in normalised device coordinates.
+    pub fn water_at(&self, ndc: Vec2) -> Option<Vec2> {
+        let inv = self.view_proj.inverse();
+        let near = inv.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
+        let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+        let d = far - near;
+        if d.y.abs() < 1e-5 {
+            return None;
+        }
+        let t = -near.y / d.y;
+        (t > 0.0).then_some(Vec2::new(near.x + d.x * t, near.z + d.z * t))
+    }
+
+    /// Where a world point shows, from the view's top-left (0, 0) to its bottom-right (1, 1).
+    pub fn project(&self, p: Vec3) -> Vec2 {
+        let c = self.view_proj * p.extend(1.0);
+        Vec2::new(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5)
+    }
+}
+
+/// How far the camera pulls back to fit a board of half-extents `half` (x, z) in an aspect
+/// ratio (w / h): framed for a 10 x 10 board in a 1.25 window, then pulled back to fit wider or
+/// deeper. Boards under 10 wide are framed as 10 wide, except in a window narrower than 1.25,
+/// where the board's own width counts (with a slimmer side margin) so a portrait phone does
+/// not lose a third of its width.
+fn fit_back(aspect: f32, half: (f32, f32)) -> f32 {
+    let narrow = ((1.25 - aspect) / 0.45).clamp(0.0, 1.0);
+    let wide = half.0.max(5.0);
+    let width = wide + (half.0 * 0.87 - wide) * narrow;
+    (half.1 / 5.0).max(width / 5.0 * 1.25 / aspect).max(0.85)
+}
+
+/// The camera over a board of half-extents `half` (x, z) for an aspect ratio (w / h), `zoom`
+/// times closer than the fit (1 shows it all) and moved by `pan` over the water. The look
+/// direction never changes: a pan moves eye and target alike.
+pub fn look(aspect: f32, half: (f32, f32), zoom: f32, pan: Vec2) -> Camera {
+    let back = fit_back(aspect, half) / zoom;
+    let shift = Vec3::new(pan.x, 0.0, pan.y);
+    let eye = Vec3::new(0.0, 12.0, 8.6) * back + shift;
+    let target = Vec3::new(0.0, -0.3, 0.55 * back) + shift;
     let view = Mat4::look_at_rh(eye, target, Vec3::Y);
     let proj = Mat4::perspective_rh(38f32.to_radians(), aspect, 0.1, 200.0);
-    Camera { view_proj: proj * view, eye, back }
+    Camera { view_proj: proj * view, eye, back, pan }
 }
 
 struct Mesh {

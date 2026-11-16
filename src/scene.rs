@@ -156,7 +156,7 @@ fn finish(scene: &mut Scene, cam: &gfx::Camera, u: Uniforms<'_>, ripple: &Ripple
         inv_view_proj: cam.view_proj.inverse().to_cols_array_2d(),
         cam: [cam.eye.x, cam.eye.y, cam.eye.z, u.time],
         sun: [sun.x, sun.y, sun.z, cam.back],
-        info: [u.hover.map_or(-1.0, |h| h as f32), 0.0, 0.0, u.status],
+        info: [u.hover.map_or(-1.0, |h| h as f32), cam.pan.x, cam.pan.y, u.status],
         viewport: [0.0; 4],
         cursor: u.cursor,
         boom: u.boom,
@@ -177,10 +177,10 @@ fn cloud_code(digit: u8, age: f32) -> f32 {
     digit as f32 * 4.0 + (grow * 0.999).max(0.02)
 }
 
-/// A game's board: tiles (the one under `hover` lit), flags, mines, boat, wreck and clouds.
-pub fn build_game(g: &Game, hover: Option<usize>, aspect: f32) -> Scene {
+/// A game's board: tiles (the one under `hover` lit), flags, mines, boat, wreck and clouds,
+/// seen through `cam` (the app's, which picking uses too).
+pub fn build_game(g: &Game, hover: Option<usize>, cam: &gfx::Camera) -> Scene {
     let sea = &g.sea;
-    let cam = gfx::camera(aspect, g.dims.half());
     let mut scene = Scene::default();
     seabed(&mut scene);
     let time = sea.time - sea.draw_lag();
@@ -224,14 +224,14 @@ pub fn build_game(g: &Game, hover: Option<usize>, aspect: f32) -> Scene {
     };
     let boom = sea.boom.map_or([0.0; 4], |(x, z)| [x, z, (sea.boom_t - sea.draw_lag()).max(0.0), 1.0]);
     let u = Uniforms { time, dims: g.dims, grid: true, cells: &cells, clouds: &clouds, hover, status, boom, cursor };
-    finish(&mut scene, &cam, u, &sea.ripple);
+    finish(&mut scene, cam, u, &sea.ripple);
     scene
 }
 
-/// The menu's sea: the menu tiles, the mine adrift, the boat or its wreck, decor clouds.
-pub fn build_lobby(l: &Lobby, aspect: f32) -> Scene {
+/// The menu's sea: the menu tiles, the mine adrift, the boat or its wreck, decor clouds, seen
+/// through `cam` (the app's).
+pub fn build_lobby(l: &Lobby, cam: &gfx::Camera) -> Scene {
     let sea = &l.sea;
-    let cam = gfx::camera(aspect, lobby::GRID.half());
     let mut scene = Scene::default();
     seabed(&mut scene);
     let time = sea.time - sea.draw_lag();
@@ -260,6 +260,6 @@ pub fn build_lobby(l: &Lobby, aspect: f32) -> Scene {
     let shows = if sea.boom_t < LOBBY_BOOM_SHOWS { 1.0 } else { 0.0 };
     let boom = sea.boom.map_or([0.0; 4], |(x, z)| [x, z, (sea.boom_t - sea.draw_lag()).max(0.0), shows]);
     let u = Uniforms { time, dims: lobby::GRID, grid: false, cells: &cells, clouds: &clouds, hover: None, status: 0.0, boom, cursor };
-    finish(&mut scene, &cam, u, &sea.ripple);
+    finish(&mut scene, cam, u, &sea.ripple);
     scene
 }

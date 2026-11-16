@@ -5,7 +5,7 @@ struct Globals {
     cam: vec4<f32>,
     // xyz direction toward the sun, w camera pull-back (fog distances scale with it)
     sun: vec4<f32>,
-    // x hover cell (-1 none), y and z unused, w status (0 play, 1 lost, 2 won)
+    // x hover cell (-1 none), y and z the camera's pan (x, z), w status (0 play, 1 lost, 2 won)
     info: vec4<f32>,
     // the board's viewport in offscreen pixels: x, y, w, h
     viewport: vec4<f32>,

@@ -26,6 +26,51 @@
   <div class="bar"><i></i></div>
   <div><a href="https://github.com/pockerhead/rune-minesweeper">Source and desktop builds on GitHub</a></div>
 </div>
+<script>
+// Two fingers zoom and pan the board. Rune (at the revision the game pins) reads only a
+// touch's first finger, so the page tracks every finger and the game reads MINES_TOUCH each
+// frame and on each press (src/pinch.rs). `pinched` is set when a second finger lands and
+// cleared when a fresh touch begins, so the first finger's press neither opens a cell nor
+// plants a flag. Capture listeners on the window hear each event before Rune does.
+(() => {
+  const touch = globalThis.MINES_TOUCH = { fingers: 0, generation: 0, x: 0, y: 0, spread: 0, pinched: false };
+  const fingers = new Map();
+  const publish = () => {
+    touch.fingers = fingers.size;
+    const [a, b] = fingers.values();
+    if (!b) return;
+    const box = document.querySelector('canvas')?.getBoundingClientRect();
+    touch.x = (a.x + b.x) / 2 - (box?.left ?? 0);
+    touch.y = (a.y + b.y) / 2 - (box?.top ?? 0);
+    touch.spread = Math.hypot(a.x - b.x, a.y - b.y);
+  };
+  addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch') return;
+    // the first finger of a fresh touch: forget any finger whose lift went unheard
+    if (e.isPrimary || fingers.size === 0) { fingers.clear(); touch.pinched = false; }
+    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (fingers.size >= 2) touch.pinched = true;
+    touch.generation++;
+    publish();
+  }, true);
+  addEventListener('pointermove', e => {
+    const f = fingers.get(e.pointerId);
+    if (!f) return;
+    f.x = e.clientX;
+    f.y = e.clientY;
+    publish();
+  }, true);
+  const lift = e => {
+    if (!fingers.delete(e.pointerId)) return;
+    touch.generation++;
+    publish();
+  };
+  addEventListener('pointerup', lift, true);
+  addEventListener('pointercancel', lift, true);
+  // Safari's own pinch zoom of the page
+  addEventListener('gesturestart', e => e.preventDefault());
+})();
+</script>
 <script type="module">
 import init from './app.js';
 // the page is one 3D scene: start on the GPU (Rune otherwise paints its first frames on the CPU)
