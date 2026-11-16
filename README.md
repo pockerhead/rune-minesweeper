@@ -17,7 +17,7 @@ Grab a build for Windows, Linux or macOS from [Releases](https://github.com/pock
 Every file comes with a SHA-256 checksum and a signed build-provenance attestation, so you can check that a binary was built by this repository's GitHub Actions from a given commit:
 
 ```sh
-gh attestation verify mines-afloat-v0.1.0-macos-arm64.tar.gz --repo pockerhead/rune-minesweeper
+gh attestation verify mines-afloat-v0.2.0-macos-arm64.tar.gz --repo pockerhead/rune-minesweeper
 ```
 
 macOS builds are not notarised yet. After unpacking, clear the quarantine flag once:

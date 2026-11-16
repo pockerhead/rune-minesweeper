@@ -1,6 +1,6 @@
 [package]
 name = "mines-afloat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Minesweeper on a living sea: a native Rust game on the Rune GPU UI framework, with Jolt Physics buoyancy"
 license = "MIT"
