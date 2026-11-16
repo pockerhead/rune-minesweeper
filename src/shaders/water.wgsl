@@ -17,36 +17,15 @@ struct VOut {
 
 @vertex
 fn vs(@location(0) xz: vec2<f32>) -> VOut {
-    let t = g.cam.w;
-    var p = vec3<f32>(xz.x, 0.0, xz.y);
-    var nx = 0.0;
-    var nz = 0.0;
-    var ny = 1.0;
-    for (var i = 0; i < 4; i++) {
-        let w = WAVES[i];
-        let d = normalize(w.xy);
-        let k = 2.0 * PI / w.w;
-        let c = sqrt(9.8 / k);
-        let f = k * (dot(d, xz) - c * t);
-        let a = w.z;
-        let q = STEEP / (k * a * 4.0);
-        let cf = cos(f);
-        let sf = sin(f);
-        p.x += q * a * d.x * cf;
-        p.z += q * a * d.y * cf;
-        p.y += a * sf;
-        let wa = k * a;
-        nx -= d.x * wa * cf;
-        nz -= d.y * wa * cf;
-        ny -= q * wa * sf;
-    }
+    let wave = swell_at(xz);
+    var p = wave.p;
     p.y += ripple_at(xz).x;
     var o: VOut;
     o.clip = g.view_proj * vec4<f32>(p, 1.0);
     o.world = p;
     o.rest = xz;
-    o.nrm = normalize(vec3<f32>(nx, ny, nz));
-    o.crest = 1.0 - ny;
+    o.nrm = normalize(wave.n);
+    o.crest = 1.0 - wave.n.y;
     return o;
 }
 

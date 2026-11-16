@@ -17,6 +17,7 @@ mod records;
 mod ripple;
 mod scene;
 mod sea;
+mod settings;
 mod water;
 
 use glam::{Vec2, Vec3};
@@ -33,6 +34,8 @@ use gfx::Gpu;
 use lobby::{Action, Lobby};
 use pinch::Touches;
 use records::Records;
+use settings::Settings;
+use water::SeaLevel;
 
 const BOARD_MARK: u32 = 1;
 /// How far down the menu's view the mine drifts across (0 top, 1 bottom).
@@ -105,6 +108,9 @@ pub struct App {
     /// The custom game: width, height, mines.
     custom: (usize, usize, usize),
     records: Records,
+    /// The player's settings, and the sea level both worlds float on.
+    settings: Settings,
+    sea: SeaLevel,
     pending: Option<(Next, f64)>,
     started: f64,
     finished: Option<f64>,
@@ -193,7 +199,17 @@ fn init() -> App {
         Some(file) if !headless => Records::load(file),
         _ => Records::default(),
     };
-    App::new(seed, records)
+    #[cfg(target_arch = "wasm32")]
+    let settings = if headless { Settings::default() } else { Settings::in_browser() };
+    #[cfg(not(target_arch = "wasm32"))]
+    let settings = match settings::default_file() {
+        Some(file) if !headless => Settings::load(file),
+        _ => Settings::default(),
+    };
+    let mut app = App::new(seed, records);
+    app.start_sea(SeaLevel::initial(gfx::sea_knob(), settings.sea(), gfx::handheld()));
+    app.settings = settings;
+    app
 }
 
 fn fmt_time(secs: f64) -> String {
@@ -209,6 +225,8 @@ impl App {
             level: None,
             custom: (12, 12, 24),
             records,
+            settings: Settings::default(),
+            sea: SeaLevel::Lively,
             pending: None,
             started: 0.0,
             finished: None,
@@ -249,9 +267,18 @@ impl App {
         }
     }
 
+    fn sea_label(&self) -> String {
+        format!("Sea:  {}", self.sea.name())
+    }
+
     fn menu_items(&self, menu: Menu) -> Vec<(String, Action)> {
         match menu {
-            Menu::Main => vec![("Play".into(), Action::Play), ("Custom game".into(), Action::Custom), ("Records".into(), Action::Records)],
+            Menu::Main => vec![
+                ("Play".into(), Action::Play),
+                ("Custom game".into(), Action::Custom),
+                ("Records".into(), Action::Records),
+                (self.sea_label(), Action::Sea),
+            ],
             Menu::Levels => {
                 let mut v: Vec<(String, Action)> = LEVELS
                     .iter()
@@ -547,6 +574,10 @@ impl App {
                 self.lobby.poke(k);
                 return;
             }
+            Action::Sea => {
+                self.turn_sea(k);
+                return;
+            }
         };
         self.lobby.blow(k);
         self.pending = Some((next, self.clock + PICK_DELAY));
@@ -579,6 +610,32 @@ impl App {
         }
     }
 
+    /// The session's first sea level: the menu's sea is there at once, and its tile says so.
+    fn start_sea(&mut self, level: SeaLevel) {
+        self.sea = level;
+        self.lobby.sea.settle_at(level);
+        self.relabel_sea();
+    }
+
+    /// A pick on the sea tile `k`: the sea turns to its next level, easing there, and the choice
+    /// is saved.
+    fn turn_sea(&mut self, k: usize) {
+        self.sea = self.sea.next();
+        self.lobby.sea.ease_to(self.sea);
+        self.settings.set_sea(self.sea);
+        self.relabel_sea();
+        self.lobby.poke(k);
+    }
+
+    fn relabel_sea(&mut self) {
+        for k in 0..self.lobby.tiles.len() {
+            if self.lobby.tiles[k].action == Action::Sea {
+                let label = self.sea_label();
+                self.lobby.relabel(k, label);
+            }
+        }
+    }
+
     fn open_menu(&mut self, menu: Menu) {
         self.game = None;
         self.pending = None;
@@ -600,7 +657,9 @@ impl App {
             Next::Menu(m) => self.open_menu(m),
             Next::Start(level, dims, mines) => {
                 self.round += 1;
-                self.game = Some(Game::with(dims, mines, self.seed ^ self.round.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+                let mut game = Game::with(dims, mines, self.seed ^ self.round.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+                game.sea.settle_at(self.sea);
+                self.game = Some(game);
                 self.level = level;
                 self.screen = Screen::Game;
                 self.started = self.clock;
@@ -986,11 +1045,28 @@ fn expert_scene(s: &mut App) {
     }
 }
 
+/// Headless: the expert board on a calm sea (`expert` floats it on the default, lively one).
+fn expert_calm_scene(s: &mut App) {
+    s.start_sea(SeaLevel::Calm);
+    expert_scene(s);
+}
+
+/// Headless: the expert board on a rough sea.
+fn expert_rough_scene(s: &mut App) {
+    s.start_sea(SeaLevel::Rough);
+    expert_scene(s);
+}
+
 fn main() {
     rune::run_with(
         AppSpec::<App> {
             min_size: Some((640.0, 520.0)),
-            scenes: &[("boom", boom_scene), ("expert", expert_scene)],
+            scenes: &[
+                ("boom", boom_scene),
+                ("expert", expert_scene),
+                ("expert-calm", expert_calm_scene),
+                ("expert-rough", expert_rough_scene),
+            ],
             poll: Some(poll),
             on_key: Some(on_key),
             ..AppSpec::new("Mines Afloat", (1100.0, 860.0), init, view)
@@ -1030,7 +1106,7 @@ mod tests {
         let (x, y) = point_at_item(s, want);
         s.pointer_moved(Some(PointerPress { x, y }));
         s.press();
-        assert!(s.pending.is_some() || matches!(want, Action::Adjust(_) | Action::Show), "{want:?} was not picked");
+        assert!(s.pending.is_some() || matches!(want, Action::Adjust(_) | Action::Show | Action::Sea), "{want:?} was not picked");
     }
 
     #[test]
@@ -1160,6 +1236,94 @@ mod tests {
             })
             .collect();
         assert_eq!(rows, water::WAVES.to_vec());
+    }
+
+    /// The swell the shaders draw (`swell_at` in common.wgsl, run on a headless GPU) rises and
+    /// slopes as water.rs's does at every sea level and while one eases into another: the
+    /// height and clock reach both through the same `Swell`.
+    #[test]
+    fn the_sea_level_scales_cpu_and_gpu_waves_alike() {
+        const PROBE: &str = r#"
+@group(1) @binding(0) var<storage, read> pts: array<vec2<f32>>;
+@group(1) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
+@compute @workgroup_size(1)
+fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
+    let w = swell_at(pts[id.x]);
+    // the rise at the rest point, and the slopes water::surface takes (-n.x, -n.z)
+    out[id.x] = vec4<f32>(w.p.y, -w.n.x, -w.n.z, 0.0);
+}
+"#;
+        use bytemuck::Zeroable;
+        let gpu = rune::render::Gpu::headless();
+        let (device, queue) = (&gpu.device, &gpu.queue);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("swell probe"),
+            source: wgpu::ShaderSource::Wgsl(format!("{}\n{PROBE}", include_str!("shaders/common.wgsl")).into()),
+        });
+        let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("swell probe"),
+            layout: None,
+            module: &module,
+            entry_point: Some("probe"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let pts: Vec<[f32; 2]> = (0..32).map(|k| [(k as f32 * 1.37).sin() * 9.0, (k as f32 * 0.71).cos() * 7.0 - 1.0]).collect();
+        let n = pts.len() as u64;
+        let buffer = |size: u64, usage: wgpu::BufferUsages| {
+            device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false })
+        };
+        let globals = buffer(std::mem::size_of::<gfx::Globals>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let pts_buf = buffer(n * 8, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let out = buffer(n * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let read = buffer(n * 16, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        queue.write_buffer(&pts_buf, 0, bytemuck::cast_slice(&pts));
+        let bind = |group: u32, entries: &[wgpu::BindGroupEntry<'_>]| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipe.get_bind_group_layout(group), entries })
+        };
+        let g0 = bind(0, &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }]);
+        let g1 = bind(
+            1,
+            &[
+                wgpu::BindGroupEntry { binding: 0, resource: pts_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: out.as_entire_binding() },
+            ],
+        );
+        // every level settled, then a level easing into the next, at a few clocks
+        let mut swells: Vec<water::Swell> =
+            SeaLevel::ALL.iter().map(|&l| water::Swell { clock: 12.3, ..water::Swell::settled(l) }).collect();
+        let mut easing = water::Swell::settled(SeaLevel::Rough);
+        for _ in 0..40 {
+            easing.step(sea::STEP, SeaLevel::Calm);
+        }
+        swells.push(easing);
+        for swell in swells {
+            let mut g = gfx::Globals::zeroed();
+            g.swell = swell.uniform();
+            queue.write_buffer(&globals, 0, bytemuck::bytes_of(&g));
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&pipe);
+                pass.set_bind_group(0, &g0, &[]);
+                pass.set_bind_group(1, &g1, &[]);
+                pass.dispatch_workgroups(n as u32, 1, 1);
+            }
+            encoder.copy_buffer_to_buffer(&out, 0, &read, 0, n * 16);
+            queue.submit([encoder.finish()]);
+            let slice = read.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |r| r.expect("map the probe"));
+            device.poll(wgpu::PollType::wait_indefinitely()).expect("the probe ran");
+            let got: Vec<[f32; 4]> = bytemuck::cast_slice(&slice.get_mapped_range().expect("the probe mapped")).to_vec();
+            read.unmap();
+            for (&[x, z], [h, sx, sz, _]) in pts.iter().zip(got) {
+                let (want, nrm) = water::surface(x, z, swell);
+                let slope = (-nrm[0] / nrm[1], -nrm[2] / nrm[1]);
+                let what = format!("{swell:?} at ({x:.2}, {z:.2})");
+                assert!((h - want).abs() < 1e-4, "{what}: the GPU rises {h}, the CPU {want}");
+                assert!((sx - slope.0).abs() < 1e-3 && (sz - slope.1).abs() < 1e-3, "{what}: slopes ({sx}, {sz}) vs {slope:?}");
+            }
+        }
     }
 
     // ---- the camera: zoom, pan, limits, and everything that looks through it ----
@@ -1523,7 +1687,7 @@ mod tests {
         let pixels = draw(&mut rt, &mut comp, true).expect("pixels");
         let board = rt.state.board;
         let labels = rt.state.menu_labels();
-        assert_eq!(labels.len(), 3, "the main menu's planks");
+        assert_eq!(labels.len(), 4, "the main menu's planks");
         for l in &labels {
             let at = (board[0] + l.x, board[1] + l.y);
             let ink = ink_share(&pixels, w as usize, at, (24.0, l.depth * 0.2));
@@ -1587,7 +1751,7 @@ mod tests {
             .filter(|i| i.label[2] > 0.0)
             .map(|i| (i.label, i.mat[3]))
             .collect();
-        assert_eq!(printed.len(), 3, "one printed plank a menu item");
+        assert_eq!(printed.len(), 4, "one printed plank a menu item");
         for (k, (label, look)) in printed.iter().enumerate() {
             let [v0, v1] = labels::row_v(k).expect("a row");
             assert_eq!((label[0], label[1]), (v0, v1), "plank {k} prints its own row");
@@ -1621,6 +1785,35 @@ mod tests {
             let items = s.menu_items(menu).len();
             assert!(items <= labels::ROWS, "{menu:?} has {items} tiles, the sheet {} rows", labels::ROWS);
         }
+    }
+
+    /// The sea tile turns the sea to its next level on each pick without leaving the menu: its
+    /// label follows, the swell eases there, the choice is saved, and a game floats on it.
+    #[test]
+    fn the_sea_tile_cycles_the_level() {
+        let mut s = app();
+        run(&mut s, 3.0);
+        let label = |s: &App| s.lobby.tiles.iter().find(|t| t.action == Action::Sea).map(|t| t.label.clone());
+        assert_eq!(label(&s).as_deref(), Some("Sea:  Lively"));
+        for want in [SeaLevel::Rough, SeaLevel::Calm, SeaLevel::Lively, SeaLevel::Rough, SeaLevel::Calm] {
+            let before = s.lobby.sea.swell.height;
+            pick(&mut s, Action::Sea);
+            assert_eq!(s.sea, want);
+            assert_eq!(s.settings.sea(), Some(want), "the choice is saved");
+            assert_eq!(label(&s), Some(format!("Sea:  {}", want.name())));
+            assert!(s.pending.is_none() && s.lobby.tiles.iter().all(|t| !t.blown), "the menu stays");
+            assert_eq!(s.lobby.sea.swell.height, before, "no snap at the pick");
+            run(&mut s, 3.0);
+            assert_eq!(s.screen, Screen::Menu(Menu::Main));
+            let settled = water::Swell::settled(want).height;
+            assert!((s.lobby.sea.swell.height - settled).abs() < 0.01, "{want:?} after three seconds: {}", s.lobby.sea.swell.height);
+        }
+        pick(&mut s, Action::Play);
+        run(&mut s, 2.0);
+        pick(&mut s, Action::Level(0));
+        run(&mut s, 2.0);
+        let g = s.game.as_ref().expect("a game");
+        assert_eq!(g.sea.swell.height, water::Swell::settled(SeaLevel::Calm).height, "the game's sea is calm from the start");
     }
 
     /// A held custom game value keeps stepping; letting go steps nothing more.

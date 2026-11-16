@@ -12,6 +12,7 @@ use rune::compose::{DeviceKey, Frame};
 use rune::render::EffectSite;
 
 use crate::ripple;
+use crate::water::SeaLevel;
 
 const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -36,6 +37,8 @@ pub struct Globals {
     pub board: [f32; 4],
     /// The interactive water square: low corner, side, texels per side.
     pub sim: [f32; 4],
+    /// The swell: a scale on the waves' height, the waves' clock (`water::Swell::uniform`).
+    pub swell: [f32; 4],
     /// Per cell: 0 closed, 1 open.
     pub cells: [[f32; 4]; MAX_CELLS / 4],
     /// Per cell: its number cloud code, 0 for none (see shaders/clouds.wgsl).
@@ -283,7 +286,8 @@ const FAST_FRAME: f32 = 1.0 / 56.0;
 /// Knobs a page's address can set, for finding out what a slow device chokes on:
 /// `?scale=0.5` pins the render scale, `?cap=30` draws the 3D scene at most that many times a
 /// second (the world still moves), `?lite=1` runs the cheapest shader loops (`?lite=0` turns
-/// them off on a phone). Native builds and pages without them use the defaults.
+/// them off on a phone), `?sea=calm|lively|rough` starts the sea at that level over the
+/// player's saved choice. Native builds and pages without them use the defaults.
 ///
 /// Phones and tablets get a lighter default: the render scale tops out at `PHONE_SCALE` and the
 /// shader loops are the cheap ones. Their browsers can report frames done that the screen never
@@ -296,6 +300,7 @@ struct Tuning {
     lite: bool,
     /// The highest render scale the controller may reach.
     max_scale: Option<f32>,
+    sea: Option<SeaLevel>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -304,10 +309,20 @@ const PHONE_SCALE: f32 = 0.45;
 /// A phone or tablet by its browser: a mobile user agent, or an iPad (which calls itself a Mac)
 /// by its touch points.
 #[cfg(target_arch = "wasm32")]
-fn handheld() -> bool {
+pub fn handheld() -> bool {
     let Some(nav) = web_sys::window().map(|w| w.navigator()) else { return false };
     let agent = nav.user_agent().unwrap_or_default();
     ["iPhone", "iPad", "Android", "Mobile"].iter().any(|k| agent.contains(k)) || (agent.contains("Macintosh") && nav.max_touch_points() > 1)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn handheld() -> bool {
+    false
+}
+
+/// The sea level the page's `?sea=` asks for, if any.
+pub fn sea_knob() -> Option<SeaLevel> {
+    tuning().sea
 }
 
 fn tuning() -> Tuning {
@@ -327,6 +342,7 @@ fn tuning() -> Tuning {
                     "scale" => t.scale = value.parse::<f32>().ok().map(|v| v.clamp(0.1, 2.0)),
                     "cap" => t.cap = value.parse::<f32>().ok().filter(|v| *v >= 1.0),
                     "lite" => t.lite = value != "0",
+                    "sea" => t.sea = SeaLevel::from_key(value),
                     _ => {}
                 }
             }

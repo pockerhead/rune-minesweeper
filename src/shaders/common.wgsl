@@ -17,6 +17,8 @@ struct Globals {
     board: vec4<f32>,
     // the interactive water square: x low corner, y side, z texels per side
     sim: vec4<f32>,
+    // the swell (water.rs Swell): x a scale on the waves' height, y the waves' own clock
+    swell: vec4<f32>,
     // per cell: 0 closed, 1 open
     cells: array<vec4<f32>, 120>,
     // per cell: its number cloud, 0 for none (see clouds.wgsl)
@@ -61,6 +63,40 @@ const WAVES = array<vec4<f32>, 4>(
     vec4<f32>(-0.7, 0.7, 0.016, 1.4),
 );
 const STEEP: f32 = 0.55;
+
+struct Wave {
+    // the surface point that rests at xz, displaced
+    p: vec3<f32>,
+    // its normal, not yet normalised: x and z are minus the slopes water::surface takes
+    n: vec3<f32>,
+};
+
+// The swell at rest point xz, at the height and clock in g.swell. Each wave's steepness q is set
+// by its table amplitude, so the height scales its sideways drift as much as its rise.
+fn swell_at(xz: vec2<f32>) -> Wave {
+    let t = g.swell.y;
+    var p = vec3<f32>(xz.x, 0.0, xz.y);
+    var n = vec3<f32>(0.0, 1.0, 0.0);
+    for (var i = 0; i < 4; i++) {
+        let w = WAVES[i];
+        let d = normalize(w.xy);
+        let k = 2.0 * PI / w.w;
+        let c = sqrt(9.8 / k);
+        let f = k * (dot(d, xz) - c * t);
+        let q = STEEP / (k * w.z * 4.0);
+        let a = w.z * g.swell.x;
+        let cf = cos(f);
+        let sf = sin(f);
+        p.x += q * a * d.x * cf;
+        p.z += q * a * d.y * cf;
+        p.y += a * sf;
+        let wa = k * a;
+        n.x -= d.x * wa * cf;
+        n.z -= d.y * wa * cf;
+        n.y -= q * wa * sf;
+    }
+    return Wave(p, n);
+}
 
 fn board_w() -> i32 { return i32(g.board.x); }
 fn board_h() -> i32 { return i32(g.board.y); }

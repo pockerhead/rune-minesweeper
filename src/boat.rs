@@ -130,7 +130,7 @@ impl Boat {
     }
 
     pub fn at(at: Vec2) -> Boat {
-        let (h, _) = water::surface(at.x, at.y, 0.0);
+        let (h, _) = water::surface(at.x, at.y, water::Swell::default());
         let yaw = -std::f32::consts::FRAC_PI_4; // facing into the board, south-east
         let pose = Pose { pos: Vec3::new(at.x, h, at.y), yaw, pitch: 0.0, roll: 0.0, squash: 0.0, mast: 0.0, flag: 0.0 };
         Boat {
@@ -222,7 +222,7 @@ impl Boat {
 
     /// One fixed step. Returns `Door` when the bow has just reached the target cell and
     /// `Arrived` when the boat has just stopped in its middle.
-    pub fn step(&mut self, dt: f32, time: f32, ripple: &mut Ripple) -> Option<Event> {
+    pub fn step(&mut self, dt: f32, swell: water::Swell, ripple: &mut Ripple) -> Option<Event> {
         self.prev = self.pose;
         self.t += dt;
         if !self.alive() {
@@ -288,7 +288,7 @@ impl Boat {
         let v = self.speed.max(0.0) / VMAX;
 
         // the water under it
-        let (h, n) = water::surface(self.pos.x, self.pos.y, time);
+        let (h, n) = water::surface(self.pos.x, self.pos.y, swell);
         let h = h + ripple.height(self.pos.x, self.pos.y);
         let old_heave = self.heave.x;
         self.heave.step(h + 0.01 - squat * 0.035, 160.0, 18.0, dt);
@@ -470,7 +470,7 @@ mod tests {
         boat.sail_to(cell, dims);
         let (mut door, mut arrived, mut t) = (None, None, 0.0);
         while arrived.is_none() && t < 20.0 {
-            match boat.step(1.0 / 60.0, t, &mut ripple) {
+            match boat.step(1.0 / 60.0, water::Swell { clock: t, ..Default::default() }, &mut ripple) {
                 Some(Event::Door(c)) => door = Some((c, t)),
                 Some(Event::Arrived(c)) => arrived = Some((c, t)),
                 None => {}

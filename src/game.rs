@@ -377,7 +377,7 @@ pub mod tests {
             let (p, q) = (sea::xyz(b.position()), b.rotation());
             assert!(p.is_finite(), "tile {} at a non-finite position", t.cell);
             let (cx, cz) = g.dims.center(t.cell);
-            let h = water::surface(p.x, p.z, g.sea.time).0 + g.sea.ripple.height(p.x, p.z);
+            let h = water::surface(p.x, p.z, g.sea.swell).0 + g.sea.ripple.height(p.x, p.z);
             dxz = dxz.max(((p.x - cx).powi(2) + (p.z - cz).powi(2)).sqrt());
             dy = dy.max((p.y - h).abs());
             up = up.min(1.0 - 2.0 * (q.x * q.x + q.z * q.z));
@@ -588,6 +588,44 @@ pub mod tests {
             let (dxz, dy, up) = anchored_stats(&g);
             assert!(dxz < 0.05 && dy < 0.1 && up > 0.95, "{dims:?} idle: off cell {dxz}, off surface {dy}, up {up}");
         }
+    }
+
+    /// How much the board sways on a sea at `level`, once settled, over ten seconds: the
+    /// steepest tilt of any tile (degrees), the most any tile heaves (metres, top to bottom), and
+    /// the furthest a tile is off its water (metres).
+    fn sway(level: crate::water::SeaLevel) -> (f32, f32, f32) {
+        let mut g = Game::with(TEST_DIMS, TEST_MINES, 0x5eed);
+        g.sea.settle_at(level);
+        for _ in 0..300 {
+            g.step();
+        }
+        let mut range = vec![(f32::MAX, f32::MIN); g.tiles.len()];
+        let (mut tilt, mut off) = (0.0f32, 0.0f32);
+        for _ in 0..600 {
+            g.step();
+            let (_, dy, up) = anchored_stats(&g);
+            tilt = tilt.max(up.clamp(-1.0, 1.0).acos().to_degrees());
+            off = off.max(dy);
+            for (r, t) in range.iter_mut().zip(&g.tiles) {
+                let y = sea::position_of(&g.sea.world, t.body.id).expect("tile body").y;
+                *r = (r.0.min(y), r.1.max(y));
+            }
+        }
+        (tilt, range.iter().map(|(lo, hi)| hi - lo).fold(0.0, f32::max), off)
+    }
+
+    /// A calm sea steadies the board: the tiles tilt and heave well under half as much as on the
+    /// lively one; a rough sea sways them more, and they still ride their water upright.
+    #[test]
+    fn a_calm_sea_steadies_the_board() {
+        use crate::water::SeaLevel;
+        let [calm, lively, rough] = SeaLevel::ALL.map(sway);
+        for (level, (tilt, heave, off)) in SeaLevel::ALL.iter().zip([calm, lively, rough]) {
+            println!("{level:?}: tilt {tilt:.2} deg, heave {heave:.3} m, off the water {off:.3} m");
+        }
+        assert!(calm.0 < lively.0 * 0.5 && calm.1 < lively.1 * 0.5, "calm {calm:?} against lively {lively:?}");
+        assert!(rough.0 > lively.0 && rough.1 > lively.1, "rough {rough:?} against lively {lively:?}");
+        assert!(rough.0 < 20.0 && rough.2 < 0.1, "rough {rough:?}");
     }
 
     /// The cursor sweeping a row at a mouse speed, then resting: the water may ripple and foam

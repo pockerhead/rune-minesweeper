@@ -12,7 +12,7 @@ use oxijolt::prelude::*;
 
 use crate::boat::{self, Boat};
 use crate::ripple::Ripple;
-use crate::water;
+use crate::water::{self, SeaLevel, Swell};
 
 /// The fixed physics step, seconds.
 pub const STEP: f32 = 1.0 / 60.0;
@@ -123,6 +123,9 @@ pub struct Sea {
     pub ripple: Ripple,
     /// Water clock, seconds.
     pub time: f32,
+    /// How rough the player wants the sea, and the swell on its way there.
+    level: SeaLevel,
+    pub swell: Swell,
     /// Time not yet stepped, under one `STEP`.
     acc: f32,
     /// Cursor on the water (world xz), and where it was at the last step.
@@ -143,6 +146,8 @@ impl Sea {
             world: PhysicsWorld::new(WorldSettings::default()).expect("physics world"),
             ripple: Ripple::covering(half),
             time: 0.0,
+            level: SeaLevel::Lively,
+            swell: Swell::default(),
             acc: 0.0,
             cursor: None,
             last_cursor: None,
@@ -151,6 +156,22 @@ impl Sea {
             boom: None,
             boom_t: 0.0,
         }
+    }
+
+    /// A new level for the swell, which eases there over a second or two.
+    pub fn ease_to(&mut self, level: SeaLevel) {
+        self.level = level;
+    }
+
+    /// The swell at `level` at once (a sea just made).
+    pub fn settle_at(&mut self, level: SeaLevel) {
+        self.level = level;
+        self.swell = Swell { clock: self.swell.clock, ..Swell::settled(level) };
+    }
+
+    /// The swell this frame, drawn between steps like everything else.
+    pub fn draw_swell(&self) -> Swell {
+        self.swell.back(self.draw_lag())
     }
 
     /// Moves the cursor without a wake between the old and the new spot (the screen changed
@@ -218,6 +239,7 @@ impl Sea {
     /// the boat reached.
     pub fn begin_step(&mut self) -> Option<boat::Event> {
         self.time += STEP;
+        self.swell.step(STEP, self.level);
         self.boom_t += STEP;
         if let (Some(a), Some(b)) = (self.last_cursor, self.cursor)
             && (a.0 - b.0).abs() + (a.1 - b.1).abs() > 0.002
@@ -225,7 +247,7 @@ impl Sea {
             self.ripple.drag(a, b);
         }
         self.last_cursor = self.cursor;
-        self.boat.step(STEP, self.time, &mut self.ripple)
+        self.boat.step(STEP, self.swell, &mut self.ripple)
     }
 
     /// Advances the dissolving tiles of `tiles` and removes those that are gone. Returns where
@@ -248,7 +270,7 @@ impl Sea {
 
     /// One step of water for `list` (see `float_bodies`); what sank out of reach is removed.
     pub fn float<T: Floating>(&mut self, list: &mut Vec<T>, half_h: f32) {
-        let sunk = float_bodies(&mut self.world, &mut self.ripple, self.time, list, half_h);
+        let sunk = float_bodies(&mut self.world, &mut self.ripple, self.swell, list, half_h);
         if !sunk.is_empty() {
             drop_bodies(&mut self.world, list, |e| sunk.contains(&e.body().id));
         }
@@ -273,7 +295,7 @@ impl Drop for Sea {
 /// One fixed step of water for a list of floating bodies: buoyancy against the swell plus the
 /// ripples, a splash when a thrown body falls back in, and for anchored ones a soft spring to
 /// `home` that also keeps them square. Returns the loose bodies that sank out of reach.
-fn float_bodies<T: Floating>(world: &mut PhysicsWorld, ripple: &mut Ripple, t: f32, list: &mut [T], half_h: f32) -> Vec<BodyId> {
+fn float_bodies<T: Floating>(world: &mut PhysicsWorld, ripple: &mut Ripple, swell: Swell, list: &mut [T], half_h: f32) -> Vec<BodyId> {
     let gravity = world.gravity();
     let mut sunk = Vec::new();
     for entry in list.iter_mut() {
@@ -288,7 +310,7 @@ fn float_bodies<T: Floating>(world: &mut PhysicsWorld, ripple: &mut Ripple, t: f
             sunk.push(body.id);
             continue;
         }
-        let (h, n) = water::surface(p.x, p.z, t);
+        let (h, n) = water::surface(p.x, p.z, swell);
         let (sx, sz) = ripple.slope(p.x, p.z);
         let h = h + ripple.height(p.x, p.z);
         let nl = ((n[0] - sx).powi(2) + n[1].powi(2) + (n[2] - sz).powi(2)).sqrt();

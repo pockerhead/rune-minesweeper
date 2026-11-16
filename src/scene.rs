@@ -122,9 +122,10 @@ fn mine_instances(scene: &mut Scene, pos: Vec3, rot: Quat, lamp: [f32; 3], t: f3
 }
 
 /// The cursor: a small warm light hovering over the water, bobbing on it.
-fn cursor_light(scene: &mut Scene, at: Option<(f32, f32)>, ripple: &Ripple, time: f32) -> [f32; 4] {
-    let Some((x, z)) = at else { return [0.0; 4] };
-    let (h, _) = water::surface(x, z, time);
+fn cursor_light(scene: &mut Scene, sea: &Sea, time: f32) -> [f32; 4] {
+    let Some((x, z)) = sea.cursor else { return [0.0; 4] };
+    let ripple = &sea.ripple;
+    let (h, _) = water::surface(x, z, sea.draw_swell());
     let y = h + ripple.height(x, z) + 0.32 + (time * 2.4).sin() * 0.025;
     scene.push(
         MeshKind::Sphere,
@@ -143,6 +144,7 @@ fn seabed(scene: &mut Scene) {
 /// What the shaders need beyond the instances.
 struct Uniforms<'a> {
     time: f32,
+    swell: water::Swell,
     dims: Dims,
     grid: bool,
     cells: &'a [f32],
@@ -178,6 +180,7 @@ fn finish(scene: &mut Scene, cam: &gfx::Camera, u: Uniforms<'_>, ripple: &Ripple
         boom: u.boom,
         board: [u.dims.w as f32, u.dims.h as f32, if u.grid { 1.0 } else { 0.0 }, CLOUD_HEIGHT],
         sim: [ripple.min, ripple.size, ripple::N as f32, 1.0],
+        swell: u.swell.uniform(),
         cells: cell_lanes,
         clouds: cloud_lanes,
     });
@@ -220,7 +223,7 @@ pub fn build_game(g: &Game, hover: Option<usize>, cam: &gfx::Camera) -> Scene {
         let Some((pos, rot)) = sea.draw_pose(mine) else { continue };
         mine_instances(&mut scene, pos, rot, lamp, time);
     }
-    let cursor = if g.status == Status::Playing { cursor_light(&mut scene, sea.cursor, &sea.ripple, time) } else { [0.0; 4] };
+    let cursor = if g.status == Status::Playing { cursor_light(&mut scene, sea, time) } else { [0.0; 4] };
     if sea.boat.alive() {
         boat_instances(&mut scene, &sea.draw_boat());
     }
@@ -239,7 +242,8 @@ pub fn build_game(g: &Game, hover: Option<usize>, cam: &gfx::Camera) -> Scene {
         Status::Won => 2.0,
     };
     let boom = sea.boom.map_or([0.0; 4], |(x, z)| [x, z, (sea.boom_t - sea.draw_lag()).max(0.0), 1.0]);
-    let u = Uniforms { time, dims: g.dims, grid: true, cells: &cells, clouds: &clouds, hover, status, boom, cursor };
+    let u =
+        Uniforms { time, swell: sea.draw_swell(), dims: g.dims, grid: true, cells: &cells, clouds: &clouds, hover, status, boom, cursor };
     finish(&mut scene, cam, u, &sea.ripple);
     scene
 }
@@ -269,7 +273,7 @@ pub fn build_lobby(l: &Lobby, cam: &gfx::Camera, under: Option<(usize, Look)>) -
         let Some((pos, rot)) = sea.draw_pose(mine) else { continue };
         mine_instances(&mut scene, pos, rot, [1.0, 0.1, 0.05], time);
     }
-    let cursor = cursor_light(&mut scene, sea.cursor, &sea.ripple, time);
+    let cursor = cursor_light(&mut scene, sea, time);
     if sea.boat.alive() {
         boat_instances(&mut scene, &sea.draw_boat());
     }
@@ -283,7 +287,18 @@ pub fn build_lobby(l: &Lobby, cam: &gfx::Camera, under: Option<(usize, Look)>) -
     }
     let shows = if sea.boom_t < LOBBY_BOOM_SHOWS { 1.0 } else { 0.0 };
     let boom = sea.boom.map_or([0.0; 4], |(x, z)| [x, z, (sea.boom_t - sea.draw_lag()).max(0.0), shows]);
-    let u = Uniforms { time, dims: lobby::GRID, grid: false, cells: &cells, clouds: &clouds, hover: None, status: 0.0, boom, cursor };
+    let u = Uniforms {
+        time,
+        swell: sea.draw_swell(),
+        dims: lobby::GRID,
+        grid: false,
+        cells: &cells,
+        clouds: &clouds,
+        hover: None,
+        status: 0.0,
+        boom,
+        cursor,
+    };
     finish(&mut scene, cam, u, &sea.ripple);
     scene
 }

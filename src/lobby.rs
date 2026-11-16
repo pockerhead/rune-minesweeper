@@ -66,6 +66,8 @@ pub enum Action {
     Adjust(usize),
     /// A tile that only shows something (a record).
     Show,
+    /// The sea's level: each pick turns it to the next one, the tile stays.
+    Sea,
 }
 
 /// A menu entry on its floating tile.
