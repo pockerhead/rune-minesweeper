@@ -33,8 +33,13 @@ globalThis.RUNE_CPU_FIRST = 'off';
 const status = document.querySelector('#status');
 const message = document.querySelector('#message');
 try {
-  if (!navigator.gpu) {
-    throw new Error('This page needs WebGPU: a recent Chrome or Edge, Safari 26, or Firefox 141+ on Windows. The desktop builds run everywhere.');
+  // ask for the adapter first: an in-app browser (Telegram, Instagram) often has navigator.gpu
+  // but no adapter behind it, and the game should say so in plain words
+  const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
+  if (!adapter) {
+    throw new Error(navigator.gpu
+      ? 'This browser has WebGPU switched off or no GPU for it. If you opened the link inside an app (Telegram, Instagram), open it in Chrome or Safari instead.'
+      : 'This page needs WebGPU: a recent Chrome or Edge (Android too), Safari 26, or Firefox 141+ on Windows. If you opened the link inside an app, open it in your browser.');
   }
   await init();
   status.remove();
