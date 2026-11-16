@@ -115,6 +115,9 @@ pub struct App {
     held: Option<(f64, (f32, f32))>,
     /// The held press already planted its flag: its release opens nothing.
     held_flagged: bool,
+    /// The render scale of the last frame, and the one the frame counter shows.
+    render_scale: f32,
+    shown_scale: f32,
 }
 
 /// Seconds a still press takes to plant a flag.
@@ -179,6 +182,8 @@ impl App {
             shown_key: 0,
             held: None,
             held_flagged: false,
+            render_scale: 1.0,
+            shown_scale: 1.0,
         };
         let items = app.menu_items(Menu::Main);
         app.lobby.set_menu(items);
@@ -588,7 +593,9 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
         .child(el().grow(1.0))
         .child(text(hint).font(TextStyle::new(12.0, 500.0)).color(t.text.alpha(0.55)))
         .child(
-            text(format!("{} FPS", s.fps)).font(TextStyle::new(13.0, 600.0).mono()).color(rune::color::hex("#7fe0c0").unwrap_or(t.text)),
+            text(if cfg!(target_arch = "wasm32") { format!("{} FPS · {:.2}x", s.fps, s.shown_scale) } else { format!("{} FPS", s.fps) })
+                .font(TextStyle::new(13.0, 600.0).mono())
+                .color(rune::color::hex("#7fe0c0").unwrap_or(t.text)),
         );
     col().key("root").w_full().h_full().fill(rune::color::hex("#0b1419").unwrap_or(t.bg)).child(bar).child(board)
 }
@@ -601,6 +608,8 @@ struct SceneCompositor {
     /// in headless runs, so a recorded video plays at the speed the game really runs;
     /// `Frame::dt` is wall time even headless.
     last_clock: Option<f64>,
+    /// A scene has been drawn into the GPU's offscreen at least once.
+    drawn: bool,
 }
 
 impl Compositor<App> for SceneCompositor {
@@ -625,7 +634,12 @@ impl Compositor<App> for SceneCompositor {
             self.gpu = Some(Gpu::new(f));
         }
         let gpu = self.gpu.as_mut().expect("gpu");
-        gpu.render(f, &scene, viewport);
+        // with no scene drawn yet there is nothing to show again, so a capped frame draws too
+        if gpu.scene_due() || !self.drawn {
+            gpu.render(f, &scene, viewport);
+            self.drawn = true;
+        }
+        f.rt.state.render_scale = gpu.scale();
         // in a browser count the frames the GPU finished, not the ones handed to it
         if let Some(finished) = gpu.finished_frames() {
             let s = &mut f.rt.state;
@@ -658,8 +672,9 @@ fn poll(s: &mut App, _t: f64, _tx: &mut rune::Tx) -> bool {
     }
     let fps = (s.fps_frames as f64 / s.fps_time).round() as u32;
     (s.fps_frames, s.fps_time) = (0, 0.0);
-    let changed = fps != s.fps;
-    s.fps = fps;
+    let scale = (s.render_scale * 100.0).round() / 100.0;
+    let changed = fps != s.fps || scale != s.shown_scale;
+    (s.fps, s.shown_scale) = (fps, scale);
     changed || moving
 }
 

@@ -148,6 +148,8 @@ pub struct Gpu {
     target: Option<Target>,
     res: Resolution,
     pace: GpuPace,
+    /// When the 3D scene was last drawn (`scene_due`).
+    last_scene: f64,
 }
 
 /// Dynamic resolution: the scene renders at `scale` device pixels per frame pixel and the blit
@@ -225,6 +227,42 @@ const MIN_SCALE: f32 = if cfg!(target_arch = "wasm32") { 0.25 } else { 0.35 };
 const SLOW_FRAME: f32 = 1.0 / 45.0;
 const FAST_FRAME: f32 = 1.0 / 56.0;
 
+/// Knobs a page's address can set, for finding out what a slow device chokes on:
+/// `?scale=0.5` pins the render scale, `?cap=30` draws the 3D scene at most that many times a
+/// second (the world still moves), `?lite=1` runs the cheapest shader loops. Native builds and
+/// pages without them use the defaults.
+#[derive(Default, Clone, Copy)]
+struct Tuning {
+    scale: Option<f32>,
+    cap: Option<f32>,
+    lite: bool,
+}
+
+fn tuning() -> Tuning {
+    static TUNING: std::sync::OnceLock<Tuning> = std::sync::OnceLock::new();
+    *TUNING.get_or_init(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let query = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+            let mut t = Tuning::default();
+            for pair in query.trim_start_matches('?').split('&') {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                match key {
+                    "scale" => t.scale = value.parse::<f32>().ok().map(|v| v.clamp(0.1, 2.0)),
+                    "cap" => t.cap = value.parse::<f32>().ok().filter(|v| *v >= 1.0),
+                    "lite" => t.lite = value != "0",
+                    _ => {}
+                }
+            }
+            t
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Tuning::default()
+        }
+    })
+}
+
 impl Resolution {
     fn new() -> Resolution {
         // the browser starts at native resolution and earns supersampling; a native window
@@ -238,6 +276,10 @@ impl Resolution {
         if rune::is_headless() {
             self.scale = full;
             return full;
+        }
+        if let Some(pinned) = tuning().scale {
+            self.scale = pinned.min(full);
+            return self.scale;
         }
         self.scale = self.scale.min(full);
         if dt > 0.0 && dt < 0.5 {
@@ -259,6 +301,9 @@ impl Resolution {
     /// 0 at the lowest scale, 1 at native resolution and above: how many steps the costly
     /// shader loops (reflections, clouds) take.
     fn quality(&self) -> f32 {
+        if tuning().lite {
+            return 0.0;
+        }
         ((self.scale - MIN_SCALE) / (1.0 - MIN_SCALE)).clamp(0.0, 1.0)
     }
 }
@@ -653,6 +698,7 @@ impl Gpu {
             sampler,
             res: Resolution::new(),
             pace: GpuPace::new(),
+            last_scene: 0.0,
         }
     }
 
@@ -660,6 +706,23 @@ impl Gpu {
     /// whose frames are finished when they are presented.
     pub fn finished_frames(&mut self) -> Option<u32> {
         cfg!(target_arch = "wasm32").then(|| self.pace.take_finished())
+    }
+
+    /// The render scale the last frame used (scene pixels per frame pixel).
+    pub fn scale(&self) -> f32 {
+        self.res.scale
+    }
+
+    /// Whether the 3D scene should be drawn this frame, under a `?cap=` limit (always without
+    /// one). A skipped frame shows the last scene again.
+    pub fn scene_due(&mut self) -> bool {
+        let Some(cap) = tuning().cap else { return true };
+        let now = now_seconds();
+        if now - self.last_scene < 1.0 / cap as f64 - 0.002 {
+            return false;
+        }
+        self.last_scene = now;
+        true
     }
 
     pub fn key(&self) -> DeviceKey {
