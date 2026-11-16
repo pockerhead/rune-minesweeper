@@ -28,7 +28,7 @@ Grab a build for Windows, Linux (x86_64, and aarch64 for a Raspberry Pi 5) or ma
 Every file comes with a SHA-256 checksum and a signed build-provenance attestation, so you can check that a binary was built by this repository's GitHub Actions from a given commit:
 
 ```sh
-gh attestation verify mines-afloat-v0.2.0-macos-arm64.tar.gz --repo pockerhead/rune-minesweeper
+gh attestation verify mines-afloat-v0.3.0-macos-arm64.tar.gz --repo pockerhead/rune-minesweeper
 ```
 
 macOS builds are not notarised yet. After unpacking, clear the quarantine flag once:
