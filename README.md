@@ -99,7 +99,7 @@ src/shaders/     WGSL: water, lit meshes, clouds, blit
 
 - **[Rune](https://github.com/anomalyco/rune)** by Anomaly: the UI framework, the compositor hook that made a game possible inside it, and the headless tooling that checked every frame.
 - **[oxijolt](https://github.com/pockerhead/oxijolt)**: safe Rust bindings to [Jolt Physics](https://github.com/jrouwe/JoltPhysics), on the desktop and in the browser.
-- **[rust_gamedev_ru](https://t.me/rust_gamedev_ru)**. On a lazy Sunday someone in that Telegram chat asked another AI to "build me a simple minesweeper with Rune", got a flat one, and the thread wished out loud for "the field as a sea with a pretty shader" and "mines with buoyancy physics", then concluded that was a lot to ask of a library meant for app UIs. Fair point. This is the reply, with warmth and a little irony, to everyone in that thread.
+- **[rust_gamedev_ru](https://t.me/rust_gamedev_ru)**. On a lazy Sunday someone in that Telegram chat asked another AI to "build me a simple minesweeper with Rune", got a flat one ([minesweeper_rune](https://github.com/madwareru/minesweeper_rune)), and the thread wished out loud for "the field as a sea with a pretty shader" and "mines with buoyancy physics", then concluded that was a lot to ask of a library meant for app UIs. Fair point. This is the reply, with warmth and a little irony, to everyone in that thread.
 
 ## License
 
