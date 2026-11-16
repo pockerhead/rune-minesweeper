@@ -107,3 +107,9 @@ fn caustics(p: vec2<f32>, t: f32) -> f32 {
     }
     return pow(clamp(1.0 - v / 1.8, 0.0, 1.0), 3.0);
 }
+
+// the pointer's ring round the point it picks: about the same size on screen however far out
+// the camera is (never under 0.17 m), breathing slowly
+fn cursor_ring_r(t: f32) -> f32 {
+    return max(0.17, 0.016 * length(g.cam.xyz - g.cursor.xyz)) + 0.015 * sin(t * 3.0);
+}

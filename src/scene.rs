@@ -6,6 +6,7 @@ use glam::{Mat4, Quat, Vec3};
 use crate::boat;
 use crate::game::{self, Dims, Game, Status};
 use crate::gfx::{self, Instance, MeshKind, Scene};
+use crate::labels;
 use crate::lobby::{self, Lobby};
 use crate::ripple::{self, Ripple};
 use crate::sea::{MINE_R, Sea};
@@ -18,6 +19,21 @@ const CLOUD_IN: f32 = 0.55;
 const CLOUD_HEIGHT: f32 = 0.9;
 /// Seconds the lobby's blast stays lit.
 const LOBBY_BOOM_SHOWS: f32 = 6.0;
+/// A menu label fades out over the first part of its tile's melt and is gone after it.
+pub const LABEL_FADE: f32 = 0.6;
+
+/// How a menu label looks: at rest, under the pointer, or under a press.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Look {
+    Rest,
+    Hovered,
+    Pressed,
+}
+
+/// How much of a menu tile's label shows as the tile melts by `fade` (0 to 1), or once blown.
+pub fn label_alpha(fade: f32, blown: bool) -> f32 {
+    if blown { 0.0 } else { (1.0 - fade / LABEL_FADE).clamp(0.0, 1.0) }
+}
 
 /// The boat, part by part, around its hull frame. Squash keeps volume: taller is thinner.
 fn boat_instances(scene: &mut Scene, pose: &boat::Pose) {
@@ -228,9 +244,9 @@ pub fn build_game(g: &Game, hover: Option<usize>, cam: &gfx::Camera) -> Scene {
     scene
 }
 
-/// The menu's sea: the menu tiles, the mine adrift, the boat or its wreck, decor clouds, seen
-/// through `cam` (the app's).
-pub fn build_lobby(l: &Lobby, cam: &gfx::Camera) -> Scene {
+/// The menu's sea: the menu tiles with their labels (the one `under` the pointer in its look), the
+/// mine adrift, the boat or its wreck, decor clouds, seen through `cam` (the app's).
+pub fn build_lobby(l: &Lobby, cam: &gfx::Camera, under: Option<(usize, Look)>) -> Scene {
     let sea = &l.sea;
     let mut scene = Scene::default();
     seabed(&mut scene);
@@ -239,7 +255,15 @@ pub fn build_lobby(l: &Lobby, cam: &gfx::Camera) -> Scene {
         let Some((pos, rot)) = sea.draw_pose(&tile.body) else { continue };
         let shade = 0.95 + 0.05 * ((k * 37 % 11) as f32 / 10.0);
         let color = [0.62 * shade, 0.52 * shade, 0.38 * shade];
-        tile_instance(&mut scene, pos, rot, lobby::ITEM, color, sea.fade_of(&tile.body), 0.0);
+        let fade = sea.fade_of(&tile.body);
+        tile_instance(&mut scene, pos, rot, lobby::ITEM, color, fade, 0.0);
+        let (Some([v0, v1]), Some(inst)) = (labels::row_v(k), scene.inst[MeshKind::Cube as usize].last_mut()) else { continue };
+        let look = match under {
+            Some((u, look)) if u == k => look,
+            _ => Look::Rest,
+        };
+        inst.label = [v0, v1, label_alpha(fade, tile.blown), 0.0];
+        inst.mat[3] = look as u8 as f32;
     }
     for mine in &l.mine {
         let Some((pos, rot)) = sea.draw_pose(mine) else { continue };

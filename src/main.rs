@@ -1,7 +1,7 @@
 //! Mines Afloat: minesweeper on water. Rune draws the UI and hosts the 3D world in an
 //! `El::effect` slot; oxijolt floats the tiles; `ripple` makes the water answer the cursor.
-//! The menu is a world of its own (`lobby`): its items are floating tiles with Rune labels on
-//! them, and picking one blows its tile up like a mine.
+//! The menu is a world of its own (`lobby`): its items are floating tiles with labels Rune
+//! paints onto their planks (`labels`), and picking one blows its tile up like a mine.
 //!
 //! This file holds the app's state and menu flow, the Rune view and the compositor that draws
 //! the 3D scene (`scene`, `gfx`) into the view's slot.
@@ -10,6 +10,7 @@ mod boat;
 mod camera;
 mod game;
 mod gfx;
+mod labels;
 mod lobby;
 mod pinch;
 mod records;
@@ -22,7 +23,8 @@ use glam::{Vec2, Vec3};
 use rune::compose::{Compositor, Frame};
 use rune::tok::{self, TextStyle};
 use rune::{
-    AppSpec, Color, Cx, Drag, El, Key, KeyEvent, MagnifyEvent, Phase, PointerButton, PointerPress, Tx, WheelEvent, col, el, row, text,
+    AppSpec, Color, Cursor, Cx, Drag, El, Key, KeyEvent, MagnifyEvent, Phase, PointerButton, PointerPress, Tx, WheelEvent, col, el, row,
+    text,
 };
 
 use camera::{Stage, View};
@@ -33,14 +35,16 @@ use pinch::Touches;
 use records::Records;
 
 const BOARD_MARK: u32 = 1;
+/// How far down the menu's view the mine drifts across (0 top, 1 bottom).
+const MINE_ROW: f32 = 0.82;
+/// The end banner's glass slot.
+const GLASS_MARK: u32 = 2;
+/// The end banner's corner radius, points.
+const BANNER_RADIUS: f32 = 18.0;
 /// How long a picked menu tile's blast plays before the next screen.
 const PICK_DELAY: f64 = 1.1;
 /// How long a finished game holds before a click returns to the menu.
 const END_HOLD: f64 = 1.2;
-/// A menu label fades out over the first part of its tile's melt and is gone after it.
-const LABEL_FADE: f32 = 0.6;
-/// Points a menu label never shrinks under, however far out the menu is zoomed.
-const MIN_LABEL: f32 = 12.0;
 /// The top bar's row height, and the window width from which its hint fits in the row.
 const BAR: f32 = 50.5;
 const ONE_ROW: f32 = 1000.0;
@@ -80,16 +84,16 @@ enum Next {
     Start(Option<&'static str>, Dims, usize),
 }
 
-/// A menu label as the view draws it: on its tile's top face, fading as the tile melts.
-struct Label<'a> {
+/// A menu label where it shows: in the middle of its tile's top face.
+#[cfg(test)]
+struct Label {
     key: usize,
-    text: &'a str,
     /// Where it sits on the board element, points.
     x: f32,
     y: f32,
-    size: f32,
-    /// How far its tile has melted, 0 to `LABEL_FADE`.
-    fade: f32,
+    /// How deep the tile's top face shows there, points: the label's row on the sheet
+    /// (`labels::STRIP`) is drawn over that depth.
+    depth: f32,
 }
 
 pub struct App {
@@ -128,6 +132,9 @@ pub struct App {
     held_flagged: bool,
     /// The render scale of the last frame, and the one the frame counter shows.
     render_scale: f32,
+    /// The GPU can draw the end banner as glass over the scene (`Gpu::glass_ready`); until it
+    /// can, the banner is frosted with `backdrop_blur`.
+    glass: bool,
     shown_scale: f32,
     /// How the player has zoomed and panned this screen's board (`App::stage` keeps it within
     /// limits). Set afresh for each game and menu.
@@ -219,6 +226,7 @@ impl App {
             held: None,
             held_flagged: false,
             render_scale: 1.0,
+            glass: false,
             shown_scale: 1.0,
             view: View::default(),
             view_landscape: None,
@@ -304,7 +312,7 @@ impl App {
         let cam = self.camera();
         match (self.screen, &self.game) {
             (Screen::Game, Some(g)) => scene::build_game(g, self.hover, &cam),
-            _ => scene::build_lobby(&self.lobby, &cam),
+            _ => scene::build_lobby(&self.lobby, &cam, self.menu_look()),
         }
     }
 
@@ -629,6 +637,9 @@ impl App {
             self.aim(true);
         }
         self.sync_touches();
+        if let Some(lane) = self.mine_lane() {
+            self.lobby.set_lane(lane);
+        }
         match (self.screen, self.game.as_mut()) {
             (Screen::Game, Some(g)) => g.advance(dt as f32),
             _ => self.lobby.advance(dt as f32),
@@ -640,62 +651,76 @@ impl App {
         self.fps_time += dt;
     }
 
-    /// The menu's labels as they land on their tiles this frame: projected from each tile's
-    /// top face, all at one face size, small enough for the longest label to stay on its tile.
-    fn menu_labels(&self) -> Vec<Label<'_>> {
+    /// The line across the lower part of the menu's view (as it opens, whatever the zoom and
+    /// pan since) that the mine drifts along: the water under the board's left and right
+    /// edges, `MINE_ROW` of the way down. None off the menu or before the board is laid out.
+    fn mine_lane(&self) -> Option<lobby::Lane> {
+        let [_, _, bw, bh] = self.board;
+        if bw <= 1.0 || bh <= 1.0 || !matches!(self.screen, Screen::Menu(_)) {
+            return None;
+        }
+        let cam = self.stage().camera(self.start_view());
+        let y = 1.0 - MINE_ROW * 2.0;
+        let (left, right) = (cam.water_at(Vec2::new(-1.0, y))?, cam.water_at(Vec2::new(1.0, y))?);
+        Some(lobby::Lane { x0: left.x, x1: right.x, z: (left.y + right.y) * 0.5 })
+    }
+
+    /// The menu's labels as they show on their tiles this frame (those of melted or blown
+    /// tiles are gone), projected from each tile's top face.
+    #[cfg(test)]
+    fn menu_labels(&self) -> Vec<Label> {
         let l = &self.lobby;
         let [_, _, bw, bh] = self.board;
-        let stage = self.stage();
-        let zoom = stage.clamp(self.view).zoom;
-        let cam = stage.camera(self.view);
-        let tile_px = (cam.project(Vec3::X * lobby::ITEM[0] * 0.5).x - cam.project(-Vec3::X * lobby::ITEM[0] * 0.5).x) * bw * 0.86;
-        let depth_px = (cam.project(Vec3::Z * lobby::ITEM[2] * 0.5).y - cam.project(-Vec3::Z * lobby::ITEM[2] * 0.5).y) * bh;
-        let longest = l.tiles.iter().map(|t| t.label.chars().count()).max().unwrap_or(1).max(1) as f32;
-        // grows with the zoom, never past the tile's depth or width, and never too small to read
-        let size = (bh / 30.0 * zoom).clamp(14.0, 26.0 * zoom).min(depth_px * 0.56).min(tile_px / (longest * 0.56)).max(MIN_LABEL);
+        let cam = self.camera();
         let mut labels = Vec::new();
         for (k, tile) in l.tiles.iter().enumerate() {
-            let fade = l.sea.fade_of(&tile.body);
-            if tile.blown || fade > LABEL_FADE {
+            if scene::label_alpha(l.sea.fade_of(&tile.body), tile.blown) <= 0.0 {
                 continue;
             }
             let Some((pos, _)) = l.sea.draw_pose(&tile.body) else { continue };
-            let at = cam.project(pos + Vec3::Y * lobby::ITEM[1] * 0.5);
-            labels.push(Label { key: k, text: &tile.label, x: at.x * bw, y: at.y * bh, size, fade });
+            let top = pos + Vec3::Y * lobby::ITEM[1] * 0.5;
+            let at = cam.project(top);
+            let half = Vec3::Z * lobby::ITEM[2] * 0.5;
+            let depth = (cam.project(top + half).y - cam.project(top - half).y) * bh;
+            labels.push(Label { key: k, x: at.x * bw, y: at.y * bh, depth });
         }
         labels
     }
 
-    /// A digest of what the view draws from moving state: each menu label (to the half point,
-    /// its fade in twentieths) and whether the end banner offers the way back yet. The view
-    /// only needs rebuilding when it changes.
+    /// The menu's labels, one per tile, for the label sheet (None off the menu).
+    fn menu_texts(&self) -> Option<Vec<String>> {
+        matches!(self.screen, Screen::Menu(_)).then(|| self.lobby.tiles.iter().map(|t| t.label.clone()).collect())
+    }
+
+    /// The menu tile under the pointer and how its label looks: pressed while a press is held
+    /// on it, hovered otherwise. None once an item is picked.
+    fn menu_look(&self) -> Option<(usize, scene::Look)> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let (x, z) = self.lobby.sea.cursor?;
+        let (k, _) = self.lobby.item_at(x, z)?;
+        Some((k, if self.held.is_some() { scene::Look::Pressed } else { scene::Look::Hovered }))
+    }
+
+    /// A digest of what the view draws from moving state: whether the end banner offers the way
+    /// back yet, and whether it can be glass. The view only needs rebuilding when it changes (the menu labels are painted in
+    /// the scene, not the view).
     fn moving_key(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(&self.screen).hash(&mut h);
-        if let Screen::Menu(_) = self.screen {
-            for label in self.menu_labels() {
-                (label.key, label.text, label.size.to_bits()).hash(&mut h);
-                ((label.x * 2.0) as i32, (label.y * 2.0) as i32, (label.fade * 20.0) as i32).hash(&mut h);
-            }
-        }
         self.finished.map(|f| self.clock - f > END_HOLD).hash(&mut h);
+        self.glass.hash(&mut h);
         h.finish()
     }
 }
 
-/// A label printed on a floating tile: dark ink with a pale lower edge, as if pressed in.
-fn tile_label(label: &Label<'_>) -> El {
-    let (size, alpha) = (label.size, 1.0 - label.fade / LABEL_FADE);
-    let font = TextStyle::new(size, 750.0);
-    let (w, h) = (size * 18.0, size * 2.0);
-    let ink = rune::color::hex("#2b1d10").unwrap_or(Color::BLACK).alpha(alpha);
-    let lit = Color::WHITE.alpha(0.5 * alpha);
-    el().key(format!("item{}", label.key))
-        .absolute(label.x - w * 0.5, label.y - h * 0.5)
-        .size(w, h)
-        .child(el().absolute(0.0, 1.2).size(w, h).center().child(text(label.text.to_string()).font(font).color(lit)))
-        .child(el().absolute(0.0, 0.0).size(w, h).center().child(text(label.text.to_string()).font(font).color(ink)))
+/// Whether the pointer shows in the scene (the cursor light and its ring on the water) in place
+/// of the OS cursor over the board: with a mouse or trackpad (not `touch`), in the menu and in
+/// a game being played. After a game, and on touch screens, the OS behaves as usual.
+fn scene_cursor(touch: bool, screen: Screen, playing: bool) -> bool {
+    !touch && (matches!(screen, Screen::Menu(_)) || playing)
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
@@ -733,14 +758,12 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             true
         })
         .on_secondary_press(|s: &mut App, p: PointerPress, _| s.secondary_press(p));
+    let playing = s.game.as_ref().is_some_and(|g| g.status == Status::Playing);
+    if scene_cursor(touch, s.screen, playing) {
+        board = board.cursor(Cursor::Hidden);
+    }
 
     match (s.screen, &s.game) {
-        (Screen::Menu(_), _) => {
-            // labels ride their tiles: projected from each tile's pose every frame
-            for label in s.menu_labels() {
-                board = board.child(tile_label(&label));
-            }
-        }
         (Screen::Game, Some(g)) if g.status != Status::Playing => {
             let since = s.finished.map_or(0.0, |f| s.clock - f);
             let (line, color) = match g.status {
@@ -758,15 +781,29 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             // 400 points wide, or the board's width less a margin (and any notch) on a phone
             let room = (bw - left_inset - right_inset - 24.0).max(1.0);
             let w = room.min(400.0);
+            let h = if since > END_HOLD { 72.0 } else { 52.0 };
+            // in the middle of the sea, so the most of it shows through the glass
+            let [_, _, _, bh] = s.board;
             let mut banner = col()
                 .key("banner")
-                .absolute(left_inset + 12.0 + (room - w) * 0.5, 18.0)
-                .size(w, if since > END_HOLD { 64.0 } else { 44.0 })
-                .radius(18.0)
-                .fill(Color::BLACK.alpha(0.5))
-                .center()
-                .gap(4.0)
-                .child(text(line).font(TextStyle::new(17.0, 700.0)).color(c));
+                .absolute(left_inset + 12.0 + (room - w) * 0.5, ((bh - h) * 0.5).max(18.0))
+                .size(w, h)
+                .radius(BANNER_RADIUS)
+                .shadow(8.0, 22.0, Color::BLACK.alpha(0.28));
+            banner = if s.glass {
+                // clear glass over the live sea, bent at its rounded rim (shaders/glass.wgsl)
+                banner.effect(GLASS_MARK)
+            } else {
+                // frosted glass: the water blurred behind it, a dark tint (dark enough alone
+                // where the target can't be copied and nothing blurs), and a lit rim brighter
+                // along its top edge
+                banner.backdrop_blur(14.0).fill(rune::color::hex("#06121a").unwrap_or(Color::BLACK).alpha(0.56)).border_gradient(
+                    1.0,
+                    Color::WHITE.alpha(0.32),
+                    Color::WHITE.alpha(0.06),
+                )
+            };
+            banner = banner.center().gap(4.0).child(text(line).font(TextStyle::new(17.0, 700.0)).color(c));
             if since > END_HOLD {
                 let back = if touch { "Tap to return to the menu" } else { "Click to return to the menu" };
                 banner = banner.child(text(back).font(TextStyle::new(12.5, 500.0)).color(Color::WHITE.alpha(0.7)));
@@ -833,6 +870,8 @@ struct SceneCompositor {
     last_clock: Option<f64>,
     /// A scene has been drawn into the GPU's offscreen at least once.
     drawn: bool,
+    /// The menu labels' sheet, made with the GPU (and again with a new one).
+    labels: Option<labels::LabelAtlas>,
 }
 
 impl Compositor<App> for SceneCompositor {
@@ -851,14 +890,28 @@ impl Compositor<App> for SceneCompositor {
 
         if self.gpu.as_ref().is_none_or(|g| g.key() != f.device_key()) {
             self.gpu = Some(Gpu::new(f));
+            self.labels = None;
         }
         let gpu = self.gpu.as_mut().expect("gpu");
+        // the menu's labels are painted onto the sheet the tiles print from when they change
+        if let Some(texts) = f.rt.state.menu_texts() {
+            let atlas = self.labels.get_or_insert_with(|| {
+                let atlas = labels::LabelAtlas::new(f.device);
+                gpu.set_labels(f.device, &atlas.view);
+                atlas
+            });
+            atlas.update(f.device, f.queue, &texts, clock);
+        }
         // with no scene drawn yet there is nothing to show again, so a capped frame draws too
         if gpu.scene_due() || !self.drawn {
             gpu.render(f, &scene, viewport);
             self.drawn = true;
         }
         f.rt.state.render_scale = gpu.scale();
+        f.rt.state.glass = gpu.glass_ready(f.format);
+        // the banner's glass, where Rune laid the banner out
+        let banner = f.rt.presented("banner").map(|r| r.0.map(|v| v * scale)).unwrap_or([0.0; 4]);
+        gpu.set_glass(f.queue, banner, BANNER_RADIUS * scale, scale, clock as f32, f.srgb_blend());
         // in a browser count the frames the GPU finished, not the ones handed to it
         if let Some(finished) = gpu.finished_frames() {
             let s = &mut f.rt.state;
@@ -871,6 +924,8 @@ impl Compositor<App> for SceneCompositor {
         f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
             if site.mark == BOARD_MARK {
                 gpu.blit(pass, site, viewport);
+            } else if site.mark == GLASS_MARK {
+                gpu.glass(pass, site, banner);
             }
         });
     }
@@ -880,8 +935,8 @@ impl Compositor<App> for SceneCompositor {
     }
 }
 
-/// The view is rebuilt when a menu label moves or fades, when the end banner offers the way
-/// back, and when the frame counter's value changes (checked twice a second).
+/// The view is rebuilt when the screen changes, when the end banner offers the way back, and
+/// when the frame counter's value changes (checked twice a second).
 fn poll(s: &mut App, _t: f64, _tx: &mut rune::Tx) -> bool {
     let key = s.moving_key();
     let moving = key != s.shown_key;
@@ -1375,6 +1430,9 @@ mod tests {
     /// and they still pick. An expert board opens zoomed to cells a finger can hit.
     #[test]
     fn a_phone_gets_finger_sized_menus_and_cells() {
+        /// Points a menu label's text may not show under on a phone.
+        const MIN_LABEL: f32 = 12.0;
+        let mut sheet = labels::LabelSheet::default();
         let mut s = App::new(0x5eed, Records::default());
         s.board = PHONE;
         run(&mut s, 3.0);
@@ -1386,13 +1444,183 @@ mod tests {
             let cam = s.camera();
             let depth = (cam.project(Vec3::Z * lobby::ITEM[2] * 0.5).y - cam.project(-Vec3::Z * lobby::ITEM[2] * 0.5).y) * s.board[3];
             assert!(depth >= 44.0, "{menu:?}: tiles {depth} pt deep");
-            let labels = s.menu_labels();
-            assert!(labels.iter().all(|l| l.size >= 13.0), "{menu:?}: labels at {} pt", labels[0].size);
+            // the text's em on screen: its size on the sheet over the row's depth, times the
+            // depth the tile's top face shows at (foreshortened by the camera's slant)
+            let size = sheet.lay_out(&s.menu_texts().expect("a menu"));
+            for l in s.menu_labels() {
+                let shows = size / labels::STRIP.1 * l.depth;
+                assert!(shows >= MIN_LABEL, "{menu:?}: label {} at {shows} pt", l.key);
+            }
             pick(&mut s, item);
         }
         let s = game_in(PHONE, 2);
         let cell = s.stage().unit_points() * s.view.zoom;
         assert!((cell - START_CELL).abs() < 1.0, "an expert cell starts at {cell} pt");
+    }
+
+    /// The OS cursor gives way to the scene's over the board with a mouse, in the menu and in
+    /// play; never on a touch screen, and not once a game is over.
+    #[test]
+    fn the_scene_cursor_replaces_the_os_one_only_with_a_mouse_in_play() {
+        assert!(scene_cursor(false, Screen::Menu(Menu::Main), false));
+        assert!(scene_cursor(false, Screen::Game, true));
+        assert!(!scene_cursor(false, Screen::Game, false), "after a game");
+        assert!(!scene_cursor(true, Screen::Menu(Menu::Custom), false), "touch, menu");
+        assert!(!scene_cursor(true, Screen::Game, true), "touch, game");
+    }
+
+    /// Dark pixels (sRGB channel mean under 70) in the `half`-point box round `at`, of the
+    /// tightly packed RGBA `pixels` `width` wide, as a share of the box.
+    fn ink_share(pixels: &[u8], width: usize, at: (f32, f32), half: (f32, f32)) -> f32 {
+        let (x0, x1) = ((at.0 - half.0) as usize, (at.0 + half.0) as usize);
+        let (y0, y1) = ((at.1 - half.1) as usize, (at.1 + half.1) as usize);
+        let mut dark = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = &pixels[(y * width + x) * 4..][..3];
+                dark += usize::from((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3 < 70);
+            }
+        }
+        dark as f32 / ((x1 - x0) * (y1 - y0)) as f32
+    }
+
+    /// The menu's labels reach the screen: the app drawn headlessly on a GPU through its
+    /// compositor shows dark ink in the middle of each plank (a bare plank shows none). Fails if
+    /// the sheet is never painted or never reaches the plank shader.
+    #[test]
+    fn menu_labels_print_on_the_planks() {
+        use rune::render::{OFFSCREEN_FORMAT, Offscreen, Renderer};
+        let gpu = rune::render::Gpu::headless();
+        let (w, h) = (1100u32, 860u32);
+        let mut rt = rune::Runtime::new(App::new(0x5eed, Records::default()), view, (w as f32, h as f32), rune::Env::new(false, 1.0));
+        let target = Offscreen::new(&gpu.device, w, h);
+        let mut ui = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
+        let mut comp = SceneCompositor::default();
+        let mut draw = |rt: &mut rune::Runtime<App>, comp: &mut SceneCompositor, read: bool| {
+            rt.frame(1.0 / 60.0);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            comp.render(&mut Frame {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                encoder: &mut encoder,
+                target: &target.view,
+                format: OFFSCREEN_FORMAT,
+                size: (w, h),
+                dt: 1.0 / 60.0,
+                update_ms: 0.0,
+                rt,
+                ui: &mut ui,
+            });
+            if read {
+                target.copy(&mut encoder);
+            }
+            gpu.queue.submit([encoder.finish()]);
+            read.then(|| target.read(&gpu.device))
+        };
+        for _ in 0..90 {
+            draw(&mut rt, &mut comp, false);
+        }
+        let pixels = draw(&mut rt, &mut comp, true).expect("pixels");
+        let board = rt.state.board;
+        let labels = rt.state.menu_labels();
+        assert_eq!(labels.len(), 3, "the main menu's planks");
+        for l in &labels {
+            let at = (board[0] + l.x, board[1] + l.y);
+            let ink = ink_share(&pixels, w as usize, at, (24.0, l.depth * 0.2));
+            assert!(ink > 0.08, "label {} shows {:.3} ink at {at:?}", l.key, ink);
+        }
+    }
+
+    /// The menu's mine drifts across the lower part of the view on a phone and a desktop: in
+    /// sight mid-lane, out of sight where it turns, clear of the longest menu's tiles; and the
+    /// mine itself follows its lane.
+    #[test]
+    fn the_mine_drifts_across_the_lower_view() {
+        for board in [PHONE, [0.0, 50.5, 1100.0, 809.5]] {
+            let mut s = App::new(0x5eed, Records::default());
+            s.board = board;
+            s.open_menu(Menu::Custom);
+            run(&mut s, 3.0);
+            let lane = s.mine_lane().expect("a lane");
+            let cam = s.camera();
+            let at = |t: f32| {
+                let (x, z) = lobby::drift_at(lane, t);
+                cam.project(Vec3::new(x, 0.0, z))
+            };
+            let r = sea::MINE_R / (lane.x1 - lane.x0);
+            // a crossing: in sight mid-way, low in the view; out of sight at both turns
+            let mid = at(lobby::DRIFT_CROSSING * 0.2);
+            assert!((0.0..1.0).contains(&mid.x) && (0.6..0.95).contains(&mid.y), "{board:?}: mid-lane at {mid}");
+            let (ends, turn) = (at(lobby::DRIFT_CROSSING * 0.7), at(lobby::DRIFT_CROSSING * 1.7));
+            for end in [ends, turn] {
+                assert!(end.x < -r || end.x > 1.0 + r, "{board:?}: the mine turns in sight at {end}");
+            }
+            assert!(ends.x * turn.x < 0.0 || (ends.x > 1.0) != (turn.x > 1.0), "{board:?}: it turns on both sides");
+            // clear of the lowest tile of the custom game's five
+            let lowest = s.lobby.tiles.iter().filter_map(|t| s.lobby.sea.draw_pose(&t.body)).map(|(p, _)| p.z).fold(f32::MIN, f32::max);
+            let gap = lobby::drift_at(lane, 0.0).1 - (lowest + lobby::ITEM[2] * 0.5);
+            assert!(gap >= sea::MINE_R + 0.3, "{board:?}: the lane runs {gap} m from the tiles");
+            // the mine follows its lane, a little behind its anchor
+            let p = s.lobby.mine.first().and_then(|m| s.lobby.sea.draw_pose(m)).expect("the mine").0;
+            let (hx, hz) = lobby::drift_at(lane, s.lobby.sea.time);
+            assert!((p.x - hx).abs() < 1.0 && (p.z - hz).abs() < 0.5, "{board:?}: the mine at {p}, its lane at ({hx}, {hz})");
+        }
+    }
+
+    /// The tile under the pointer looks hovered, pressed while a press is held, and nothing
+    /// looks either once an item is picked; the scene prints each tile's own row in that look.
+    #[test]
+    fn the_label_under_the_pointer_takes_its_look() {
+        let mut s = App::new(0x5eed, Records::default());
+        s.board = [0.0, 50.5, 1100.0, 809.5];
+        run(&mut s, 2.0);
+        assert_eq!(s.menu_look(), None, "no pointer");
+        let (pos, _) = s.lobby.sea.draw_pose(&s.lobby.tiles[1].body).expect("a tile");
+        s.lobby.sea.cursor = Some((pos.x, pos.z));
+        assert_eq!(s.menu_look(), Some((1, scene::Look::Hovered)));
+        s.held = Some((s.clock, (0.0, 0.0)));
+        assert_eq!(s.menu_look(), Some((1, scene::Look::Pressed)));
+        s.held = None;
+
+        let printed: Vec<([f32; 4], f32)> = scene::build_lobby(&s.lobby, &s.camera(), s.menu_look()).inst[gfx::MeshKind::Cube as usize]
+            .iter()
+            .filter(|i| i.label[2] > 0.0)
+            .map(|i| (i.label, i.mat[3]))
+            .collect();
+        assert_eq!(printed.len(), 3, "one printed plank a menu item");
+        for (k, (label, look)) in printed.iter().enumerate() {
+            let [v0, v1] = labels::row_v(k).expect("a row");
+            assert_eq!((label[0], label[1]), (v0, v1), "plank {k} prints its own row");
+            let want = if k == 1 { scene::Look::Hovered } else { scene::Look::Rest };
+            assert_eq!(*look, want as u8 as f32, "plank {k}");
+        }
+
+        s.pending = Some((Next::Menu(Menu::Main), s.clock));
+        assert_eq!(s.menu_look(), None, "picked");
+    }
+
+    #[test]
+    fn a_label_fades_with_its_melting_tile() {
+        assert_eq!(scene::label_alpha(0.0, false), 1.0);
+        assert!((scene::label_alpha(scene::LABEL_FADE * 0.5, false) - 0.5).abs() < 1e-6);
+        assert_eq!(scene::label_alpha(scene::LABEL_FADE, false), 0.0);
+        assert_eq!(scene::label_alpha(0.9, false), 0.0);
+        assert_eq!(scene::label_alpha(0.0, true), 0.0, "blown");
+    }
+
+    /// Every menu has a row on the label sheet for each of its tiles: a tile past
+    /// `labels::ROWS` would float with a bare plank.
+    #[test]
+    fn every_menu_fits_the_label_sheet() {
+        let s = App::new(0x5eed, Records::default());
+        for menu in [Menu::Main, Menu::Levels, Menu::Custom, Menu::Records] {
+            // a new menu must join the list above before this compiles again
+            match menu {
+                Menu::Main | Menu::Levels | Menu::Custom | Menu::Records => {}
+            }
+            let items = s.menu_items(menu).len();
+            assert!(items <= labels::ROWS, "{menu:?} has {items} tiles, the sheet {} rows", labels::ROWS);
+        }
     }
 
     /// A held custom game value keeps stepping; letting go steps nothing more.

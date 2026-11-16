@@ -15,8 +15,17 @@ use crate::sea::{self, Body, Floating, MINE_R, Sea, position_of, spawn_anchored}
 pub const GRID: Dims = Dims { w: 12, h: 10 };
 /// Where the boat waits: above the menu.
 pub const BASE: Vec2 = Vec2::new(0.0, -4.4);
-/// Where the mine drifts, off to the side of the menu.
+/// Where the mine drifts, off to the side of the menu, until it has a lane (`Lobby::set_lane`).
 pub const MINE_HOME: (f32, f32) = (4.4, 1.2);
+/// Seconds the mine takes to drift across its lane, one way.
+pub const DRIFT_CROSSING: f32 = 20.0;
+/// How far past the view's side edges the mine turns back, metres: out of sight.
+const DRIFT_OFF: f32 = 1.4;
+/// The nearest (in z) the mine's lane runs to the menu: past the lowest tile of the longest
+/// menu (five tiles), with room for the mine and its bobbing.
+pub const DRIFT_MIN_Z: f32 = 3.9;
+/// How far along its lane the mine starts, so it shows from the first frame.
+const DRIFT_START: f32 = 0.3;
 /// Seconds after a blast until the boat and the mine are back.
 const RESPAWN: f32 = 10.0;
 /// A menu tile's size: width, thickness, depth.
@@ -24,6 +33,25 @@ pub const ITEM: [f32; 3] = [4.4, 0.14, 0.86];
 const ITEM_GAP: f32 = 1.12;
 /// How close the boat may come to the mine before it goes off.
 const MINE_REACH: f32 = 0.55;
+
+/// The line the mine drifts along, across the lower part of the view: from x0 (the view's left
+/// edge) to x1 (its right edge) at depth z.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Lane {
+    pub x0: f32,
+    pub x1: f32,
+    pub z: f32,
+}
+
+/// Where the mine is held `t` seconds in: it sets off from part way along `lane`, crosses
+/// from beyond one side of the view to beyond the other in `DRIFT_CROSSING` seconds, turns
+/// back out of sight, and crosses again.
+pub fn drift_at(lane: Lane, t: f32) -> (f32, f32) {
+    let (a, b) = (lane.x0 - DRIFT_OFF, lane.x1 + DRIFT_OFF);
+    let phase = (t / DRIFT_CROSSING + DRIFT_START).rem_euclid(2.0);
+    let s = if phase < 1.0 { phase } else { 2.0 - phase };
+    (a + (b - a) * s, lane.z.max(DRIFT_MIN_Z))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -64,6 +92,8 @@ pub struct Lobby {
     pub mine: Vec<Body>,
     pub tiles: Vec<MenuTile>,
     respawn_at: Option<f32>,
+    /// The mine's lane across the view, once the app has framed it.
+    lane: Option<Lane>,
     mine_shape: Shape,
     tile_shape: Shape,
     seed: u64,
@@ -78,6 +108,7 @@ impl Lobby {
             mine: Vec::new(),
             tiles: Vec::new(),
             respawn_at: None,
+            lane: None,
             mine_shape: Shape::new_sphere(MINE_R).expect("mine shape"),
             tile_shape: Shape::new_box(Vec3::new(ITEM[0] * 0.5, ITEM[1] * 0.5, ITEM[2] * 0.5)).expect("item shape"),
             seed,
@@ -88,8 +119,24 @@ impl Lobby {
         lobby
     }
 
+    /// Where the mine is held now: on its lane, or at `MINE_HOME` without one.
+    fn mine_home(&self) -> (f32, f32) {
+        self.lane.map_or(MINE_HOME, |lane| drift_at(lane, self.sea.time))
+    }
+
+    /// Sets the lane the mine drifts along (see `drift_at`). The first one puts the mine there
+    /// at once, bobbing up, rather than towing it across the sea.
+    pub fn set_lane(&mut self, lane: Lane) {
+        let first = self.lane.is_none();
+        self.lane = Some(lane);
+        if first && !self.mine.is_empty() {
+            sea::drop_bodies(&mut self.sea.world, &mut self.mine, |_| true);
+            self.spawn_mine(-0.3);
+        }
+    }
+
     fn spawn_mine(&mut self, depth: f32) {
-        let (x, z) = MINE_HOME;
+        let (x, z) = self.mine_home();
         let settings = BodySettings::new_dynamic();
         if let Ok(mine) = spawn_anchored(&mut self.sea.world, &self.mine_shape, settings, [x, depth, z], sea::MINE_BUOYANCY, 4.0) {
             self.mine.push(mine);
@@ -180,7 +227,7 @@ impl Lobby {
 
     fn explode_mine(&mut self) {
         let Some(mine) = self.mine.pop() else { return };
-        let (x, z) = position_of(&self.sea.world, mine.id).map_or(MINE_HOME, |p| (p.x, p.z));
+        let (x, z) = position_of(&self.sea.world, mine.id).map_or(self.mine_home(), |p| (p.x, p.z));
         let _ = self.sea.world.remove_body(mine.id);
         self.sea.blast(x, z, 2.5);
         self.sea.wreck_boat((x, z), self.seed ^ self.sea.time.to_bits() as u64);
@@ -220,6 +267,12 @@ impl Lobby {
         }
         if self.respawn_at.is_some_and(|t| self.sea.time >= t) {
             self.respawn();
+        }
+
+        // the mine drifts along its lane, held by its anchor's spring
+        let home = self.mine_home();
+        for mine in &mut self.mine {
+            mine.home = home;
         }
 
         // menu tiles melt without the lace ring a game tile leaves

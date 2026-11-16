@@ -52,8 +52,12 @@ pub struct Instance {
     /// xyz scale, w kind (0 plain, 1 seabed)
     pub scale: [f32; 4],
     pub color: [f32; 4],
-    /// metallic, roughness, emissive
+    /// metallic, roughness, emissive, and for a menu tile its label's look (0 at rest, 1
+    /// hovered, 2 pressed)
     pub mat: [f32; 4],
+    /// A menu tile's label on its top face: its row on the label sheet (v top, v bottom, see
+    /// `labels::row_v`), and how much of it shows (0 none).
+    pub label: [f32; 4],
 }
 
 impl Instance {
@@ -63,6 +67,7 @@ impl Instance {
             scale: [scale.x, scale.y, scale.z, 0.0],
             color: [color[0], color[1], color[2], 1.0],
             mat: [metal, rough, emissive, 0.0],
+            label: [0.0; 4],
         }
     }
 }
@@ -157,6 +162,7 @@ struct Target {
     refr_tex: wgpu::Texture,
     depth: wgpu::TextureView,
     blit_bg: wgpu::BindGroup,
+    glass_bg: wgpu::BindGroup,
     water_bg: wgpu::BindGroup,
 }
 
@@ -174,12 +180,20 @@ pub struct Gpu {
     globals: wgpu::Buffer,
     water_bgl: wgpu::BindGroupLayout,
     scene_bg: wgpu::BindGroup,
+    /// The label sheet the tiles print from (`labels`), with its sampler.
+    label_bgl: wgpu::BindGroupLayout,
+    label_sampler: wgpu::Sampler,
+    label_bg: wgpu::BindGroup,
     ripple_tex: wgpu::Texture,
     blit_mod: wgpu::ShaderModule,
     blit_layout: wgpu::PipelineLayout,
     blit_bgl: wgpu::BindGroupLayout,
     blit_buf: wgpu::Buffer,
     blit_pipes: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    /// The end banner's glass (shaders/glass.wgsl): it reads the scene like the blit does.
+    glass_mod: wgpu::ShaderModule,
+    glass_buf: wgpu::Buffer,
+    glass_pipes: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
     sampler: wgpu::Sampler,
     meshes: [Mesh; 3],
     inst: [(wgpu::Buffer, usize); 3],
@@ -371,6 +385,22 @@ impl Resolution {
     }
 }
 
+fn label_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("labels"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
 fn shader(device: &wgpu::Device, label: &str, src: String) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(Cow::Owned(src)) })
 }
@@ -499,6 +529,7 @@ impl Gpu {
         let lit_mod = shader(device, "lit", format!("{common}\n{clouds_src}\n{}", include_str!("shaders/lit.wgsl")));
         let water_mod = shader(device, "water", format!("{common}\n{clouds_src}\n{}", include_str!("shaders/water.wgsl")));
         let blit_mod = shader(device, "blit", include_str!("shaders/blit.wgsl").to_string());
+        let glass_mod = shader(device, "glass", include_str!("shaders/glass.wgsl").to_string());
 
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene"),
@@ -550,9 +581,51 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&ripple_view) },
             ],
         });
-        let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene"),
-            bind_group_layouts: &[Some(&scene_bgl)],
+        let label_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("labels"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        // trilinear and anisotropic: the planks are seen at a slant
+        let label_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("labels"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        // until the first labels are painted, a sheet with nothing on it
+        let blank = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("no labels"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let label_bg = label_bind_group(device, &label_bgl, &label_sampler, &blank.create_view(&Default::default()));
+        let lit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lit"),
+            bind_group_layouts: &[Some(&scene_bgl), Some(&label_bgl)],
             immediate_size: 0,
         });
 
@@ -561,10 +634,10 @@ impl Gpu {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
         ];
-        let inst_attrs = [f4(2, 0), f4(3, 16), f4(4, 32), f4(5, 48), f4(6, 64), f4(7, 80), f4(8, 96)];
+        let inst_attrs = [f4(2, 0), f4(3, 16), f4(4, 32), f4(5, 48), f4(6, 64), f4(7, 80), f4(8, 96), f4(9, 112)];
         let lit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lit"),
-            layout: Some(&scene_layout),
+            layout: Some(&lit_layout),
             vertex: wgpu::VertexState {
                 module: &lit_mod,
                 entry_point: Some("vs"),
@@ -748,12 +821,23 @@ impl Gpu {
             globals,
             water_bgl,
             scene_bg,
+            label_bgl,
+            label_sampler,
+            label_bg,
             ripple_tex,
             blit_mod,
             blit_layout,
             blit_bgl,
             blit_buf,
             blit_pipes: HashMap::new(),
+            glass_mod,
+            glass_buf: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glass"),
+                size: 64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            glass_pipes: HashMap::new(),
             meshes: [mesh(device, cube()), mesh(device, sphere()), mesh(device, cone())],
             inst,
             water_mesh,
@@ -792,6 +876,11 @@ impl Gpu {
         self.key
     }
 
+    /// The label sheet the menu tiles print from from now on (`labels::LabelAtlas::view`).
+    pub fn set_labels(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) {
+        self.label_bg = label_bind_group(device, &self.label_bgl, &self.label_sampler, view);
+    }
+
     fn ensure_blit(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
         if self.blit_pipes.contains_key(&format) {
             return;
@@ -818,6 +907,39 @@ impl Gpu {
             cache: None,
         });
         self.blit_pipes.insert(format, p);
+    }
+
+    /// The glass pipeline for `format`: premultiplied, over what the slot's pass holds.
+    fn ensure_glass(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) {
+        if self.glass_pipes.contains_key(&format) {
+            return;
+        }
+        let p = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("glass"),
+            layout: Some(&self.blit_layout),
+            vertex: wgpu::VertexState {
+                module: &self.glass_mod,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &self.glass_mod,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        self.glass_pipes.insert(format, p);
     }
 
     fn ensure_target(&mut self, device: &wgpu::Device, size: (u32, u32)) {
@@ -860,7 +982,16 @@ impl Gpu {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
-        self.target = Some(Target { size, color_tex, color, refr_tex, depth, blit_bg, water_bg });
+        let glass_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("glass"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color) },
+                wgpu::BindGroupEntry { binding: 1, resource: self.glass_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.target = Some(Target { size, color_tex, color, refr_tex, depth, blit_bg, glass_bg, water_bg });
     }
 
     /// Renders the scene into the offscreen at `viewport` (device px of the full frame);
@@ -881,6 +1012,8 @@ impl Gpu {
         self.ensure_target(device, size);
         self.ensure_blit(device, f.format);
         self.ensure_blit(device, HDR);
+        self.ensure_glass(device, f.format);
+        self.ensure_glass(device, HDR);
 
         let [vx, vy, vw, vh] = viewport.map(|v| v * ss);
         let (fw, fh) = (size.0 as f32, size.1 as f32);
@@ -949,6 +1082,7 @@ impl Gpu {
         });
         pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
         pass.set_bind_group(0, &self.scene_bg, &[]);
+        pass.set_bind_group(1, &self.label_bg, &[]);
         pass.set_pipeline(&self.lit);
         for (k, m) in self.meshes.iter().enumerate() {
             let n = scene.inst[k].len() as u32;
@@ -1002,6 +1136,51 @@ impl Gpu {
         pass.set_index_buffer(self.water_mesh.ib.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..self.water_mesh.n, 0, 0..1);
         pass.set_pipeline(&self.clouds);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Whether the end banner can be drawn as glass over the scene in a frame of `format` (a
+    /// scene has been drawn and the glass pipeline is built); `backdrop_blur` stands in until
+    /// then.
+    pub fn glass_ready(&self, format: wgpu::TextureFormat) -> bool {
+        self.target.is_some() && self.glass_pipes.contains_key(&format)
+    }
+
+    /// Sets the glass for this frame: the banner's `rect` in frame device pixels, its corner
+    /// `radius` and `scale` device pixels per point, at `seconds`, in a frame blended in sRGB
+    /// (`srgb`) or not.
+    pub fn set_glass(&self, queue: &wgpu::Queue, rect: [f32; 4], radius: f32, scale: f32, seconds: f32, srgb: bool) {
+        // the rim bends the sea at most 0.3 of its width: 2 * bend < rim keeps it from folding
+        let rim = 20.0 * scale;
+        #[rustfmt::skip]
+        let data = [
+            0.0, 0.0, if srgb { 1.0 } else { 0.0 }, 1.0,
+            self.res.scale, 0.0, 0.0, seconds,
+            rect[0], rect[1], rect[2], rect[3],
+            radius, rim, rim * 0.3, scale,
+        ];
+        queue.write_buffer(&self.glass_buf, 0, bytemuck::cast_slice(&data));
+    }
+
+    /// Draws the banner's glass into its effect slot's pass, over `rect` (frame device pixels,
+    /// as given to `set_glass`).
+    pub fn glass(&self, pass: &mut wgpu::RenderPass<'_>, site: &EffectSite<'_>, rect: [f32; 4]) {
+        let (Some(p), Some(t)) = (self.glass_pipes.get(&site.format), self.target.as_ref()) else { return };
+        let [ox, oy] = site.origin;
+        let [x, y, w, h] = [rect[0] - ox, rect[1] - oy, rect[2], rect[3]];
+        let c = site.instance.clip;
+        let (sw, sh) = (site.size[0] as f32, site.size[1] as f32);
+        let x0 = x.max(c[0].floor() - ox).clamp(0.0, sw).floor();
+        let y0 = y.max(c[1].floor() - oy).clamp(0.0, sh).floor();
+        let x1 = (x + w).min(c[2].ceil() - ox).clamp(0.0, sw).ceil();
+        let y1 = (y + h).min(c[3].ceil() - oy).clamp(0.0, sh).ceil();
+        if x1 <= x0 || y1 <= y0 || w < 1.0 || h < 1.0 {
+            return;
+        }
+        pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        pass.set_scissor_rect(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+        pass.set_pipeline(p);
+        pass.set_bind_group(0, &t.glass_bg, &[]);
         pass.draw(0..3, 0..1);
     }
 

@@ -225,6 +225,12 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
         let glow_col = vec3<f32>(1.0, 0.78, 0.45) * g.cursor.w;
         c += glow_col * pow(max(dot(n, hl), 0.0), 220.0) * 6.0 / (1.0 + dl * dl * 2.0);
         c += glow_col * 0.25 * max(dot(n, ld), 0.0) / (1.0 + dl * dl * 6.0);
+        // the pointer's mark on the water: a thin ring round the point it picks, riding the
+        // waves and breathing slowly (the OS cursor is hidden over the board on a desktop)
+        let r = cursor_ring_r(t);
+        let w = max(footprint * 1.2, 0.012);
+        let ring = 1.0 - smoothstep(w * 0.5, w * 1.5, abs(length(i.world.xz - g.cursor.xz) - r));
+        c = mix(c, glow_col * 1.4, ring * 0.75);
     }
     let dist = length(g.cam.xyz - i.world) / g.sun.w;
     let fog = clamp((dist - 22.0) / 30.0, 0.0, 1.0);
