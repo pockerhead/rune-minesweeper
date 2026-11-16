@@ -63,6 +63,9 @@ const WAVES = array<vec4<f32>, 4>(
     vec4<f32>(-0.7, 0.7, 0.016, 1.4),
 );
 const STEEP: f32 = 0.55;
+// where the swell heads overall: WAVES' directions weighted by their amplitudes. The fine
+// ripples, the foam and the caustics go this way too, so the sea moves as one.
+const SWELL_DIR: vec2<f32> = vec2<f32>(0.663, -0.749);
 
 struct Wave {
     // the surface point that rests at xz, displaced

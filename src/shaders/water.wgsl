@@ -29,19 +29,39 @@ fn vs(@location(0) xz: vec2<f32>) -> VOut {
     return o;
 }
 
-// fine ripples: analytic slopes of small travelling sines, two octaves of six
-fn detail(p: vec2<f32>, t: f32) -> vec2<f32> {
+// the fine ripples' headings: within 60 degrees of SWELL_DIR (the angle off it in the comment),
+// and the last two, the smallest, a little cross-chop
+const RIPPLE_DIRS = array<vec2<f32>, 12>(
+    vec2<f32>(0.661, -0.750), // +0
+    vec2<f32>(-0.078, -0.997), // -46
+    vec2<f32>(0.938, -0.347), // +28
+    vec2<f32>(0.405, -0.914), // -18
+    vec2<f32>(0.990, 0.140), // +57
+    vec2<f32>(0.790, -0.613), // +11
+    vec2<f32>(0.111, -0.994), // -35
+    vec2<f32>(0.986, -0.164), // +39
+    vec2<f32>(0.569, -0.822), // -7
+    vec2<f32>(-0.193, -0.981), // -53
+    vec2<f32>(0.624, 0.781), // +100
+    vec2<f32>(-0.896, -0.444), // -105
+);
+
+// fine ripples: analytic slopes of small travelling sines, two octaves of six. They ride the
+// swell: taken at the rest point (so the swell carries them), run on its clock, and lie flatter
+// on a calmer sea, though never flat.
+fn detail(p: vec2<f32>) -> vec2<f32> {
+    let t = g.swell.y;
+    let height = 0.45 + 0.55 * g.swell.x;
     var s = vec2<f32>(0.0);
     for (var i = 0; i < 12; i++) {
         let fi = f32(i);
-        let ang = fi * 2.399 + 0.6;
-        let d = vec2<f32>(cos(ang), sin(ang));
+        let d = RIPPLE_DIRS[i];
         let k = 4.0 + fi * 2.6;
         let a = 0.010 / (1.0 + fi * 0.5);
         let ph = k * dot(d, p) - t * sqrt(9.8 * k) * 0.55;
         s += d * (k * a * cos(ph));
     }
-    return s;
+    return s * height;
 }
 
 // world position of the opaque surface seen at offscreen pixel px
@@ -96,7 +116,7 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     // fewer fine ripples where a pixel spans a lot of water: no shimmering far away
     let footprint = length(fwidth(i.rest));
     let fade = 1.0 / (1.0 + footprint * footprint * 900.0);
-    let sl = detail(i.world.xz, t) * fade;
+    let sl = detail(i.rest) * fade;
     let rp = ripple_at(i.rest);
     let rs = ripple_slope(i.rest);
     let n = normalize(i.nrm + vec3<f32>(-sl.x - rs.x, 0.0, -sl.y - rs.y));
@@ -176,7 +196,9 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     c += vec3<f32>(1.0, 0.72, 0.45) * pow(max(dot(n, h), 0.0), shine) * (shine / 1400.0) * 9.0 * sunlit;
 
     // foam: steep crests, the cursor wake, splashes; laced like the real thing
-    let lace = caustics(i.rest * 1.9 + sl * 3.0, t * 0.4);
+    // the lace rides the swell with the water it floats on (the rest point), drifting slowly
+    // downwind and churning on the swell's clock
+    let lace = caustics((i.rest - SWELL_DIR * g.swell.y * 0.06) * 1.9 + sl * 1.5, g.swell.y * 0.25);
     var foam = smoothstep(0.26, 0.40, i.crest + length(sl) * 0.4) * lace * 0.5;
     foam = max(foam, smoothstep(0.08, 0.8, rp.y) * (0.25 + 1.1 * lace));
 

@@ -132,11 +132,13 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     }
 
     // under the surface: light falls off with depth, caustics dance on what faces up
-    // (the water pass absorbs along the view ray; here only the light that reaches down)
+    // (the water pass absorbs along the view ray; here only the light that reaches down). They
+    // run on the swell's clock and drift its way, as the surface that casts them does.
     let depth = -i.world.y;
     if (depth > 0.0) {
         let k = exp(-depth * vec3<f32>(0.60, 0.28, 0.20));
-        let ca = caustics(i.world.xz + l.xz * depth * 0.4, t) * max(n.y, 0.0) * sheen;
+        let cp = i.world.xz + l.xz * depth * 0.4 - SWELL_DIR * g.swell.y * 0.15;
+        let ca = caustics(cp, g.swell.y) * max(n.y, 0.0) * sheen;
         c = c * k + ca * k * vec3<f32>(0.85, 1.0, 0.9) * 1.4;
     }
 
