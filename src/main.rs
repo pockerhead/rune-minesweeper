@@ -112,15 +112,27 @@ pub struct App {
     shown_key: u64,
 }
 
+/// Something different every launch to seed the boards with.
+fn wall_clock_seed() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // the browser has no system clock for std; ask JavaScript
+        (js_sys::Date::now() * 1000.0) as u64 ^ (js_sys::Math::random() * u32::MAX as f64) as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x5eed, |d| d.as_nanos() as u64)
+    }
+}
+
 fn init() -> App {
     // a new world every launch; headless runs (snapshots, scripts, scenes) stay reproducible
     // and never touch the records file
     let headless = rune::is_headless();
-    let seed = if headless {
-        0x5eed
-    } else {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x5eed, |d| d.as_nanos() as u64)
-    };
+    let seed = if headless { 0x5eed } else { wall_clock_seed() };
+    #[cfg(target_arch = "wasm32")]
+    let records = if headless { Records::default() } else { Records::in_browser() };
+    #[cfg(not(target_arch = "wasm32"))]
     let records = match records::default_file() {
         Some(file) if !headless => Records::load(file),
         _ => Records::default(),

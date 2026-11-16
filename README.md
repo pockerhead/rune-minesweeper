@@ -6,6 +6,10 @@
 
 It is a native app in Rust, built on **[Rune](https://github.com/anomalyco/rune)**, a GPU-rendered UI framework, with **[oxijolt](https://crates.io/crates/oxijolt)** (Jolt Physics) floating every tile, mine and splinter on the waves. One window, one wgpu device: Rune draws the interface and hands the 3D world a slot in its own frame.
 
+## Play in the browser
+
+**[pockerhead.github.io/rune-minesweeper](https://pockerhead.github.io/rune-minesweeper/)**: the same app compiled to WebAssembly, Jolt and all. It needs WebGPU, which means a recent Chrome or Edge, Safari 26, or Firefox 141+ on Windows.
+
 ## Download
 
 Grab a build for Windows, Linux or macOS from [Releases](https://github.com/pockerhead/rune-minesweeper/releases).
@@ -50,6 +54,10 @@ The menu is part of the world too. Its items are floating tiles, and picking one
 
 About 5,000 lines of Rust and WGSL, with 33 tests for the rules, the water, the boat routes and the menu world. Rune's headless tooling renders to PNG or video from scripted input, and it was used to check every change. The GIFs above came out of it.
 
+## Browser build
+
+`web/build.sh` builds the wasm version into `web/dist`. It needs the `wasm32-unknown-unknown` target, `wasm-bindgen-cli` at the version in `Cargo.lock`, and `WASI_SDK_PATH` pointing at wasi-sdk 34: oxijolt compiles Jolt for the browser with it. The `pages` workflow does the same on every push to `main` and publishes the result.
+
 ## Build from source
 
 You need a recent stable Rust, and on Linux the usual windowing headers:
@@ -86,6 +94,12 @@ src/ripple.rs    the interactive water
 src/gfx.rs       wgpu passes, meshes, instancing
 src/shaders/     WGSL: water, lit meshes, clouds, blit
 ```
+
+## Credits
+
+- **[Rune](https://github.com/anomalyco/rune)** by Anomaly: the UI framework, the compositor hook that made a game possible inside it, and the headless tooling that checked every frame.
+- **[oxijolt](https://github.com/pockerhead/oxijolt)**: safe Rust bindings to [Jolt Physics](https://github.com/jrouwe/JoltPhysics), on the desktop and in the browser.
+- **[rust_gamedev_ru](https://t.me/rust_gamedev_ru)**. On a lazy Sunday someone in that Telegram chat asked another AI to "build me a simple minesweeper with Rune", got a flat one, and the thread wished out loud for "the field as a sea with a pretty shader" and "mines with buoyancy physics", then concluded that was a lot to ask of a library meant for app UIs. Fair point. This is the reply, with warmth and a little irony, to everyone in that thread.
 
 ## License
 

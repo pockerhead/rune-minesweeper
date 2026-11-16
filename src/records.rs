@@ -1,7 +1,7 @@
 //! Best times per level, kept in a small text file (`name=seconds` per line) in the user's
 //! data folder: `%APPDATA%\mines-afloat` on Windows, `~/Library/Application Support/mines-afloat`
-//! on macOS, `$XDG_DATA_HOME/mines-afloat` (`~/.local/share`) elsewhere. Records without a file
-//! (headless runs, tests) are kept in memory only.
+//! on macOS, `$XDG_DATA_HOME/mines-afloat` (`~/.local/share`) elsewhere, and the page's
+//! `localStorage` in a browser. Records without a store (headless runs, tests) stay in memory.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,16 @@ pub struct Records {
     best: BTreeMap<String, f64>,
     /// Where they are saved; None keeps them in memory.
     file: Option<PathBuf>,
+    /// Saved in the browser's `localStorage` instead.
+    browser: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+const STORAGE_KEY: &str = "mines-afloat.records";
+
+#[cfg(target_arch = "wasm32")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
 }
 
 /// The records file in this user's data folder, if there is a home folder to find it by.
@@ -41,7 +51,14 @@ impl Records {
                 BTreeMap::new()
             }
         };
-        Records { best, file: Some(file) }
+        Records { best, file: Some(file), browser: false }
+    }
+
+    /// The records this browser keeps for the page; new records are saved there.
+    #[cfg(target_arch = "wasm32")]
+    pub fn in_browser() -> Records {
+        let text = local_storage().and_then(|s| s.get_item(STORAGE_KEY).ok().flatten()).unwrap_or_default();
+        Records { best: parse(&text), file: None, browser: true }
     }
 
     pub fn best(&self, level: &str) -> Option<f64> {
@@ -60,16 +77,32 @@ impl Records {
         {
             eprintln!("mines: could not save the records to {}: {e}", file.display());
         }
+        if self.browser {
+            self.save_browser();
+        }
         true
+    }
+
+    fn text(&self) -> String {
+        self.best.iter().map(|(k, v)| format!("{k}={v:.3}\n")).collect()
     }
 
     fn save(&self, file: &Path) -> std::io::Result<()> {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let text: String = self.best.iter().map(|(k, v)| format!("{k}={v:.3}\n")).collect();
-        std::fs::write(file, text)
+        std::fs::write(file, self.text())
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save_browser(&self) {
+        if local_storage().and_then(|s| s.set_item(STORAGE_KEY, &self.text()).ok()).is_none() {
+            web_sys::console::warn_1(&"mines: could not save the records to localStorage".into());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_browser(&self) {}
 }
 
 #[cfg(test)]

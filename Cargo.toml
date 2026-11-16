@@ -15,7 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "7a92d24d63d9be8480e3e475489d2a4d0ed48c8d" }
-oxijolt = "1.5"
+# oxijolt from its repository: its wasm32 support is not in a crates.io release yet
+oxijolt = { git = "https://github.com/pockerhead/oxijolt", rev = "6a96af972a09a428f250484791aad78a89f1a64b" }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
 fastrand = "2"
@@ -26,6 +27,10 @@ wgpu = { version = "~30.0.1", default-features = false, features = ["std", "park
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal"] }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Storage", "console"] }
 
 # Rune is pre-release: pinned to a revision of its `dev` branch. Rune patches a few crates with
 # its own versions (vendor/ in its repository) and asks apps built on it to apply the same patches.

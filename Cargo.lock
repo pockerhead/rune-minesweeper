@@ -1594,8 +1594,10 @@ dependencies = [
  "bytemuck",
  "fastrand",
  "glam",
+ "js-sys",
  "oxijolt",
  "rune",
+ "web-sys",
  "wgpu",
 ]
 
@@ -2188,8 +2190,7 @@ dependencies = [
 [[package]]
 name = "oxijolt"
 version = "1.5.0+jolt-5.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26c93a95c664468d0f8b70f6a8e5b709081677a78a20781b55a0b5d0f27827f8"
+source = "git+https://github.com/pockerhead/oxijolt?rev=6a96af972a09a428f250484791aad78a89f1a64b#6a96af972a09a428f250484791aad78a89f1a64b"
 dependencies = [
  "oxijolt-sys",
 ]
@@ -2197,8 +2198,7 @@ dependencies = [
 [[package]]
 name = "oxijolt-sys"
 version = "1.5.0+jolt-5.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95f28c731530e7ad84db2bc94c787c41fb868089b1fd03b5aaa244bfe3e46b38"
+source = "git+https://github.com/pockerhead/oxijolt?rev=6a96af972a09a428f250484791aad78a89f1a64b#6a96af972a09a428f250484791aad78a89f1a64b"
 dependencies = [
  "anyhow",
  "cc",
