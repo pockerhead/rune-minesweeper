@@ -119,8 +119,8 @@ struct Target {
     water_bg: wgpu::BindGroup,
 }
 
-/// Supersampling factor per axis for a frame of `size` device pixels, on a device whose
-/// textures can be `max_dim` pixels wide.
+/// Render scale per axis at full quality for a frame of `size` device pixels, on a device whose
+/// textures can be `max_dim` pixels wide: 2x supersampling where it fits, 1 otherwise.
 fn supersample(size: (u32, u32), max_dim: u32) -> u32 {
     if size.0 * size.1 <= 2_600_000 && size.0.max(size.1) * 2 <= max_dim { 2 } else { 1 }
 }
@@ -139,10 +139,67 @@ pub struct Gpu {
     blit_bgl: wgpu::BindGroupLayout,
     blit_buf: wgpu::Buffer,
     blit_pipes: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    sampler: wgpu::Sampler,
     meshes: [Mesh; 3],
     inst: [(wgpu::Buffer, usize); 3],
     water_mesh: Mesh,
     target: Option<Target>,
+    res: Resolution,
+}
+
+/// Dynamic resolution: the scene renders at `scale` device pixels per frame pixel and the blit
+/// filters it to the frame. The scale follows the frame time, from `MIN_SCALE` up to the full
+/// quality the device takes, so a phone keeps its frame rate and a desktop keeps supersampling.
+/// Headless runs always render at full quality.
+struct Resolution {
+    scale: f32,
+    /// Smoothed seconds per frame.
+    frame: f32,
+    /// Seconds since the scale last moved.
+    since: f32,
+}
+
+const MIN_SCALE: f32 = 0.35;
+/// Frame times that make the scale drop or rise (about 45 and 56 frames a second).
+const SLOW_FRAME: f32 = 1.0 / 45.0;
+const FAST_FRAME: f32 = 1.0 / 56.0;
+
+impl Resolution {
+    fn new() -> Resolution {
+        // the browser starts at native resolution and earns supersampling; a native window
+        // starts at full quality and gives it up only when it has to
+        let scale = if cfg!(target_arch = "wasm32") { 1.0 } else { 4.0 };
+        Resolution { scale, frame: 1.0 / 60.0, since: 0.0 }
+    }
+
+    /// The scale for this frame, after a frame that took `dt` seconds, at most `full`.
+    fn step(&mut self, dt: f32, full: f32) -> f32 {
+        if rune::is_headless() {
+            self.scale = full;
+            return full;
+        }
+        self.scale = self.scale.min(full);
+        if dt > 0.0 && dt < 0.5 {
+            self.frame += (dt - self.frame) * 0.1;
+        }
+        self.since += dt;
+        if self.since > 0.4 {
+            if self.frame > SLOW_FRAME && self.scale > MIN_SCALE {
+                self.scale = (self.scale * 0.85).max(MIN_SCALE);
+                self.since = 0.0;
+            } else if self.frame < FAST_FRAME && self.scale < full {
+                self.scale = (self.scale * 1.08).min(full);
+                self.since = 0.0;
+            }
+        }
+        self.scale
+    }
+
+    /// 0 at the lowest scale, 1 at native resolution and above: how many steps the costly
+    /// shader loops (reflections, clouds) take.
+    fn quality(&self) -> f32 {
+        ((self.scale - MIN_SCALE) / (1.0 - MIN_SCALE)).clamp(0.0, 1.0)
+    }
 }
 
 fn shader(device: &wgpu::Device, label: &str, src: String) -> wgpu::ShaderModule {
@@ -224,20 +281,30 @@ fn cone() -> (Vec<[f32; 6]>, Vec<u32>) {
     (v, idx)
 }
 
+/// Coordinates along one axis: `step` apart over [lo, hi], then each gap 12 % wider than the
+/// last out to `lo_end` and `hi_end`.
+fn graded_axis(lo: f32, hi: f32, step: f32, lo_end: f32, hi_end: f32) -> Vec<f32> {
+    let outward = |from: f32, to: f32, dir: f32| {
+        let (mut x, mut s, mut out) = (from, step, Vec::new());
+        while (to - x) * dir > 0.0 {
+            s *= 1.12;
+            x += s * dir;
+            out.push(x);
+        }
+        out
+    };
+    let n = ((hi - lo) / step).round() as usize;
+    let mut v: Vec<f32> = outward(lo, lo_end, -1.0).into_iter().rev().collect();
+    v.extend((0..=n).map(|i| lo + i as f32 * step));
+    v.extend(outward(hi, hi_end, 1.0));
+    v
+}
+
 fn water_grid() -> (Vec<[f32; 2]>, Vec<u32>) {
-    let step = 0.1;
-    // fine over x in [-32, 32]; past that (only very wide windows look so far sideways) the
-    // columns widen by 15 % each until x reaches 200, so the water never ends in view
-    let mut outer = Vec::new();
-    let (mut x, mut s) = (32.0f32, step);
-    while x < 200.0 {
-        s *= 1.15;
-        x += s;
-        outer.push(x);
-    }
-    let xs: Vec<f32> =
-        outer.iter().rev().map(|x| -x).chain((0..=640).map(|i| -32.0 + i as f32 * step)).chain(outer.iter().copied()).collect();
-    let zs: Vec<f32> = (0..=580).map(|j| -42.0 + j as f32 * step).collect();
+    // fine (14 cm) over the largest board and its margin, coarser out to the horizon: the
+    // swell is long, and the ripples and glints are shaded per pixel anyway
+    let xs = graded_axis(-19.0, 19.0, 0.14, -200.0, 200.0);
+    let zs = graded_axis(-14.0, 12.0, 0.14, -140.0, 40.0);
     let (nx, nz) = (xs.len() as u32, zs.len() as u32);
     let mut v = Vec::with_capacity((nx * nz) as usize);
     for &z in &zs {
@@ -445,7 +512,7 @@ impl Gpu {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -461,7 +528,19 @@ impl Gpu {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let blit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blit"),
@@ -510,6 +589,8 @@ impl Gpu {
             inst,
             water_mesh,
             target: None,
+            sampler,
+            res: Resolution::new(),
         }
     }
 
@@ -582,6 +663,7 @@ impl Gpu {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color) },
                 wgpu::BindGroupEntry { binding: 1, resource: self.blit_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
         self.target = Some(Target { size, color_tex, color, refr_tex, depth, blit_bg, water_bg });
@@ -592,19 +674,22 @@ impl Gpu {
     pub fn render<S: 'static>(&mut self, f: &mut Frame<'_, S>, scene: &Scene, viewport: [f32; 4]) {
         let device = f.device;
         let queue = f.queue;
-        let ss = supersample(f.size, device.limits().max_texture_dimension_2d);
-        let size = (f.size.0 * ss, f.size.1 * ss);
+        // the target is sized for full quality; a lower scale uses its top-left part
+        let full = supersample(f.size, device.limits().max_texture_dimension_2d);
+        let size = (f.size.0 * full, f.size.1 * full);
+        let ss = self.res.step(f.dt as f32, full as f32);
         self.ensure_target(device, size);
         self.ensure_blit(device, f.format);
         self.ensure_blit(device, HDR);
 
-        let [vx, vy, vw, vh] = viewport.map(|v| v * ss as f32);
+        let [vx, vy, vw, vh] = viewport.map(|v| v * ss);
         let (fw, fh) = (size.0 as f32, size.1 as f32);
         let vx = vx.clamp(0.0, fw - 1.0);
         let vy = vy.clamp(0.0, fh - 1.0);
         let (vw, vh) = (vw.min(fw - vx).max(1.0), vh.min(fh - vy).max(1.0));
         if let Some(mut g) = scene.globals {
             g.viewport = [vx, vy, vw, vh];
+            g.sim[3] = self.res.quality();
             queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&g));
         }
         queue.write_texture(
@@ -638,7 +723,7 @@ impl Gpu {
         }
         let srgb = if f.srgb_blend() { 1.0 } else { 0.0 };
         let [bx, by, bw, bh] = viewport;
-        queue.write_buffer(&self.blit_buf, 0, bytemuck::cast_slice(&[bx, by, srgb, 1.0, ss as f32, 0.0, bw, bh]));
+        queue.write_buffer(&self.blit_buf, 0, bytemuck::cast_slice(&[bx, by, srgb, 1.0, ss, 0.0, bw, bh]));
 
         let t = self.target.as_ref().expect("target");
         // 1. everything solid: seabed, tiles, mines

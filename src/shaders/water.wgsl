@@ -80,7 +80,10 @@ fn scene_at(px: vec2<i32>) -> vec3<f32> {
 fn ssr(p: vec3<f32>, r: vec3<f32>) -> vec4<f32> {
     let dims = vec2<i32>(textureDimensions(behind));
     var t = 0.04;
-    for (var k = 0; k < SSR_STEPS; k++) {
+    // fewer, longer steps when the GPU is struggling (`g.sim.w`, the render quality)
+    let steps = i32(mix(f32(SSR_STEPS) * 0.3, f32(SSR_STEPS), g.sim.w));
+    let grow = mix(1.32, 1.13, g.sim.w);
+    for (var k = 0; k < steps; k++) {
         let q = p + r * t;
         let clip = g.view_proj * vec4<f32>(q, 1.0);
         if (clip.w <= 0.0) { break; }
@@ -102,7 +105,7 @@ fn ssr(p: vec3<f32>, r: vec3<f32>) -> vec4<f32> {
                 return vec4<f32>(textureLoad(behind, px, 0).rgb, edge * fade);
             }
         }
-        t = t * 1.13 + 0.015;
+        t = t * grow + 0.015;
         if (t > 3.5) { break; }
     }
     return vec4<f32>(0.0);
@@ -131,7 +134,7 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     // cursor light (screen space) and the number clouds (ray-traced)
     let rn = normalize(r);
     var mirror = ssr(i.world, rn);
-    let mirrored = cloud_hit(i.world, rn, CLOUD_REFLECT_STEPS);
+    let mirrored = cloud_hit(i.world, rn, i32(mix(f32(CLOUD_REFLECT_STEPS) * 0.45, f32(CLOUD_REFLECT_STEPS), g.sim.w)));
     if (mirrored.x > 0.0) {
         mirror = vec4<f32>(cloud_shade(i.world + rn * mirrored.x, i32(mirrored.y), -rn, false), 1.0);
     }
@@ -242,7 +245,7 @@ fn cloud_fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let far = g.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
     let ro = g.cam.xyz;
     let rd = normalize(far.xyz / far.w - near.xyz / near.w);
-    let hit = cloud_hit(ro, rd, CLOUD_VIEW_STEPS);
+    let hit = cloud_hit(ro, rd, i32(mix(f32(CLOUD_VIEW_STEPS) * 0.45, f32(CLOUD_VIEW_STEPS), g.sim.w)));
     if (hit.x < 0.0) { discard; }
     // behind something solid (the boat's mast, say): not drawn
     let behind_px = vec2<i32>(pos.xy);

@@ -19,7 +19,7 @@ mod water;
 use glam::{Vec3, Vec4};
 use rune::compose::{Compositor, Frame};
 use rune::tok::{self, TextStyle};
-use rune::{AppSpec, Color, Cx, El, Key, KeyEvent, PointerPress, col, el, row, text};
+use rune::{AppSpec, Color, Cx, Drag, El, Key, KeyEvent, Phase, PointerPress, col, el, row, text};
 
 use game::{Dims, Game, Status};
 use gfx::Gpu;
@@ -110,7 +110,17 @@ pub struct App {
     clock: f64,
     /// What the view drew last from moving state (see `App::moving_key`).
     shown_key: u64,
+    /// A press being held (clock when it went down, where): held still long enough, it plants a
+    /// flag, so touch screens without a right button can flag too.
+    held: Option<(f64, (f32, f32))>,
+    /// The held press already planted its flag: its release opens nothing.
+    held_flagged: bool,
 }
+
+/// Seconds a still press takes to plant a flag.
+const LONG_PRESS: f64 = 0.45;
+/// Points a press may wander and still count as held still.
+const LONG_PRESS_SLOP: f32 = 12.0;
 
 /// Something different every launch to seed the boards with.
 fn wall_clock_seed() -> u64 {
@@ -167,6 +177,8 @@ impl App {
             fps: 0,
             clock: 0.0,
             shown_key: 0,
+            held: None,
+            held_flagged: false,
         };
         let items = app.menu_items(Menu::Main);
         app.lobby.set_menu(items);
@@ -269,7 +281,40 @@ impl App {
         self.hover = hover;
     }
 
+    /// Down, move and up of any press on the board, mouse or touch: the press is aimed where it
+    /// went down (a touch has no hover before it), and a still one turns into a flag.
+    fn drag(&mut self, d: &Drag) {
+        let [x, y] = d.window_point();
+        match d.phase {
+            Phase::Down => {
+                self.held = Some((self.clock, (x, y)));
+                self.held_flagged = false;
+            }
+            Phase::Move => {
+                if self.held.is_some_and(|(_, (x0, y0))| (x - x0).hypot(y - y0) > LONG_PRESS_SLOP) {
+                    self.held = None;
+                }
+            }
+            Phase::Up => self.held = None,
+        }
+        self.pointer_moved(Some(PointerPress { x, y }));
+    }
+
+    /// A press held still for `LONG_PRESS` plants a flag, once.
+    fn watch_hold(&mut self) {
+        if let Some((at, (x, y))) = self.held
+            && !self.held_flagged
+            && self.clock - at >= LONG_PRESS
+        {
+            self.held_flagged = true;
+            self.secondary_press(PointerPress { x, y });
+        }
+    }
+
     fn press(&mut self) {
+        if std::mem::take(&mut self.held_flagged) {
+            return;
+        }
         match self.screen {
             Screen::Game => {
                 let Some(g) = self.game.as_mut() else { return };
@@ -400,6 +445,7 @@ impl App {
             (Screen::Game, Some(g)) => g.advance(dt as f32),
             _ => self.lobby.advance(dt as f32),
         }
+        self.watch_hold();
         self.watch_end();
         self.settle();
         self.fps_frames += 1;
@@ -484,6 +530,7 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
                 s.pointer_moved(None);
             }
         })
+        .on_drag(|s: &mut App, d: &mut Drag, _| s.drag(d))
         .on_press(|s: &mut App| s.press())
         .on_secondary_press(|s: &mut App, p: PointerPress, _| s.secondary_press(p));
 
@@ -525,7 +572,7 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
         _ => {}
     }
 
-    let hint = "Click the water to sail  ·  right-click to flag  ·  Esc for the menu";
+    let hint = "Click the water to sail  ·  right-click or long-press to flag  ·  Esc for the menu";
     let bar = row()
         .w_full()
         .padding(14.0)

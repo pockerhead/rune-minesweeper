@@ -29,7 +29,7 @@ xattr -d com.apple.quarantine mines-afloat
 ## Play
 
 - **Click a cell** to send the boat. It finds its way along the channels, the tile melts, and the numbers puff up as clouds.
-- **Right-click** to plant a flag.
+- **Right-click**, or **long-press** on a touch screen, to plant a flag.
 - **Esc** goes back to the menu.
 - Move the cursor over the water: it is a little light that drags a foam wake behind it.
 
@@ -50,7 +50,7 @@ The menu is part of the world too. Its items are floating tiles, and picking one
 | **Number clouds** | Signed distance fields: seven-segment strokes swept into fat tubes and roughened with 3D noise, lit with wrapped sun, sky fill, ambient occlusion and a silver lining. Rays find them with a 2D DDA over the cell grid, so a full Expert board costs about the same as a small one. They cast soft shadows on the water and tiles. |
 | **Physics** | oxijolt (Jolt 5.6). Every tile is a dynamic body with buoyancy against the same wave function the shader uses, plus the ripples, a soft spring to its cell and a torque that keeps it square. Mines, the wrecked boat and blown-up menu tiles are bodies too. |
 | **The boat** | Animated, not simulated, and following Disney's principles. It anticipates before it sets off and eases in and out. It rocks theatrically, banks into turns and dips its nose when it brakes. Mast and flag follow through on looser springs, and the hull squashes and stretches on the swell. |
-| **Image** | HDR offscreen, 2× supersampling, ACES tonemap per sample before the downsample. |
+| **Image** | HDR offscreen and ACES tonemapping. The render scale follows the frame time: 2× supersampling where the GPU has room, down to a third of native resolution on a phone, with the costliest shader loops shortened to match. |
 
 About 5,000 lines of Rust and WGSL, with 33 tests for the rules, the water, the boat routes and the menu world. Rune's headless tooling renders to PNG or video from scripted input, and it was used to check every change. The GIFs above came out of it.
 

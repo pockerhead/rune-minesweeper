@@ -161,7 +161,7 @@ fn finish(scene: &mut Scene, cam: &gfx::Camera, u: Uniforms<'_>, ripple: &Ripple
         cursor: u.cursor,
         boom: u.boom,
         board: [u.dims.w as f32, u.dims.h as f32, if u.grid { 1.0 } else { 0.0 }, CLOUD_HEIGHT],
-        sim: [ripple.min, ripple.size, ripple::N as f32, 0.0],
+        sim: [ripple.min, ripple.size, ripple::N as f32, 1.0],
         cells: cell_lanes,
         clouds: cloud_lanes,
     });

@@ -1,7 +1,7 @@
 struct Blit {
     // xy the board's top-left in frame device pixels, z srgb encode (1/0), w exposure
     p: vec4<f32>,
-    // x supersampling factor per axis, zw the board's size in frame device pixels
+    // x scene pixels per frame pixel (dynamic resolution), zw the board's size in frame device pixels
     q: vec4<f32>,
 };
 
@@ -13,6 +13,7 @@ struct VOut {
 
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> b: Blit;
+@group(0) @binding(2) var smooth_sampler: sampler;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VOut {
@@ -36,19 +37,20 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(i: VOut) -> @location(0) vec4<f32> {
-    let dims = vec2<i32>(textureDimensions(scene));
-    let ss = i32(b.q.x);
-    // the frame pixel under this fragment, wherever the pass's target sits in the frame
-    let base = vec2<i32>(floor(b.p.xy + i.uv * b.q.zw)) * ss;
-    // tonemap each sample, then average: bright glints don't fatten the edges they sit on
+    let dims = vec2<f32>(textureDimensions(scene));
+    let scale = b.q.x;
+    // where this fragment sits in the frame, wherever the pass's target sits in it
+    let frame_px = b.p.xy + i.uv * b.q.zw;
+    // four filtered taps a quarter pixel around it: a 2x2 box at 2x supersampling, a smooth
+    // upscale below native resolution. Tonemap each tap, then average, so bright glints don't
+    // fatten the edges they sit on.
     var c = vec3<f32>(0.0);
-    for (var y = 0; y < ss; y++) {
-        for (var x = 0; x < ss; x++) {
-            let px = clamp(base + vec2<i32>(x, y), vec2<i32>(0), dims - vec2<i32>(1));
-            c += aces(textureLoad(scene, px, 0).rgb * b.p.w);
-        }
+    for (var k = 0; k < 4; k++) {
+        let o = vec2<f32>(f32(k & 1), f32(k >> 1u)) * 0.5 - 0.25;
+        let uv = (frame_px + o) * scale / dims;
+        c += aces(textureSampleLevel(scene, smooth_sampler, uv, 0.0).rgb * b.p.w);
     }
-    c /= f32(ss * ss);
+    c *= 0.25;
     if (b.p.z > 0.5) { c = encode(c); }
     return vec4<f32>(c, 1.0);
 }
