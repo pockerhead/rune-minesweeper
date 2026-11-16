@@ -1,5 +1,15 @@
 # Mines Afloat
 
+[![CI](https://github.com/pockerhead/rune-minesweeper/actions/workflows/ci.yml/badge.svg)](https://github.com/pockerhead/rune-minesweeper/actions/workflows/ci.yml)
+[![Pages](https://github.com/pockerhead/rune-minesweeper/actions/workflows/pages.yml/badge.svg)](https://pockerhead.github.io/rune-minesweeper/)
+[![Release](https://img.shields.io/github/v/release/pockerhead/rune-minesweeper)](https://github.com/pockerhead/rune-minesweeper/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/pockerhead/rune-minesweeper/total)](https://github.com/pockerhead/rune-minesweeper/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Play in the browser](https://img.shields.io/badge/play-WebGPU-2ea44f)](https://pockerhead.github.io/rune-minesweeper/)
+[![Built with Rune](https://img.shields.io/badge/UI-Rune-8a5cf6)](https://github.com/anomalyco/rune)
+[![Physics: Jolt](https://img.shields.io/badge/physics-Jolt%20via%20oxijolt-orange)](https://github.com/pockerhead/oxijolt)
+[![Rust](https://img.shields.io/badge/rust-stable-b7410e?logo=rust)](https://www.rust-lang.org/)
+
 **Minesweeper on a living sea.** The board floats. A tiny boat sails the channels between the tiles to every cell you open, the tile melts into the water in front of its bow, and if there is a mine underneath, the boat makes it to the middle and goes up in a ball of fire. The numbers hang above the water as little volumetric clouds that cast shadows and show up in the reflections.
 
 ![Gameplay](docs/gameplay.gif)
@@ -12,7 +22,7 @@ It is a native app in Rust, built on **[Rune](https://github.com/anomalyco/rune)
 
 ## Download
 
-Grab a build for Windows, Linux or macOS from [Releases](https://github.com/pockerhead/rune-minesweeper/releases).
+Grab a build for Windows, Linux (x86_64, and aarch64 for a Raspberry Pi 5) or macOS from [Releases](https://github.com/pockerhead/rune-minesweeper/releases).
 
 Every file comes with a SHA-256 checksum and a signed build-provenance attestation, so you can check that a binary was built by this repository's GitHub Actions from a given commit:
 
