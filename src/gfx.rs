@@ -229,13 +229,32 @@ const FAST_FRAME: f32 = 1.0 / 56.0;
 
 /// Knobs a page's address can set, for finding out what a slow device chokes on:
 /// `?scale=0.5` pins the render scale, `?cap=30` draws the 3D scene at most that many times a
-/// second (the world still moves), `?lite=1` runs the cheapest shader loops. Native builds and
-/// pages without them use the defaults.
+/// second (the world still moves), `?lite=1` runs the cheapest shader loops (`?lite=0` turns
+/// them off on a phone). Native builds and pages without them use the defaults.
+///
+/// Phones and tablets get a lighter default: the render scale tops out at `PHONE_SCALE` and the
+/// shader loops are the cheap ones. Their browsers can report frames done that the screen never
+/// shows (Safari on an iPhone 13 reports 58 a second at 0.7x while it shows a handful), so
+/// the frame-time controller alone keeps them too heavy.
 #[derive(Default, Clone, Copy)]
 struct Tuning {
     scale: Option<f32>,
     cap: Option<f32>,
     lite: bool,
+    /// The highest render scale the controller may reach.
+    max_scale: Option<f32>,
+}
+
+#[cfg(target_arch = "wasm32")]
+const PHONE_SCALE: f32 = 0.45;
+
+/// A phone or tablet by its browser: a mobile user agent, or an iPad (which calls itself a Mac)
+/// by its touch points.
+#[cfg(target_arch = "wasm32")]
+fn handheld() -> bool {
+    let Some(nav) = web_sys::window().map(|w| w.navigator()) else { return false };
+    let agent = nav.user_agent().unwrap_or_default();
+    ["iPhone", "iPad", "Android", "Mobile"].iter().any(|k| agent.contains(k)) || (agent.contains("Macintosh") && nav.max_touch_points() > 1)
 }
 
 fn tuning() -> Tuning {
@@ -245,6 +264,10 @@ fn tuning() -> Tuning {
         {
             let query = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
             let mut t = Tuning::default();
+            if handheld() {
+                t.max_scale = Some(PHONE_SCALE);
+                t.lite = true;
+            }
             for pair in query.trim_start_matches('?').split('&') {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
                 match key {
@@ -281,6 +304,7 @@ impl Resolution {
             self.scale = pinned.min(full);
             return self.scale;
         }
+        let full = tuning().max_scale.map_or(full, |m| m.min(full));
         self.scale = self.scale.min(full);
         if dt > 0.0 && dt < 0.5 {
             self.frame += (dt - self.frame) * 0.1;

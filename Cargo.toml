@@ -30,7 +30,7 @@ wgpu = { version = "~30.0.1", default-features = false, features = ["std", "park
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Storage", "console", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "console", "Location", "Navigator"] }
 
 # Rune is pre-release: pinned to a revision of its `dev` branch. Rune patches a few crates with
 # its own versions (vendor/ in its repository) and asks apps built on it to apply the same patches.
