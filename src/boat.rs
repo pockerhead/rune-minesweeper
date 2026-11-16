@@ -30,6 +30,86 @@ const BRAKE: f32 = 9.0;
 const DOOR: f32 = 0.75;
 const CORNER: f32 = 0.16;
 const WINDUP: f32 = 0.16;
+/// How fast a blast's drift dies away on a boat at rest, per second.
+const DRIFT_DRAG: f32 = 3.0;
+/// The radius of the corners `sail_free` rounds going around an `Area`.
+const AROUND: f32 = 0.5;
+
+/// A patch of water the boat sails around (the menu's planks): min and max corners, world xz.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Area {
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
+impl Area {
+    fn contains(&self, p: Vec2) -> bool {
+        p.x > self.min.x && p.x < self.max.x && p.y > self.min.y && p.y < self.max.y
+    }
+
+    /// The nearest point just outside, for a point inside.
+    fn exit(&self, p: Vec2) -> Vec2 {
+        if !self.contains(p) {
+            return p;
+        }
+        let out = 0.01;
+        [
+            (p.x - self.min.x, Vec2::new(self.min.x - out, p.y)),
+            (self.max.x - p.x, Vec2::new(self.max.x + out, p.y)),
+            (p.y - self.min.y, Vec2::new(p.x, self.min.y - out)),
+            (self.max.y - p.y, Vec2::new(p.x, self.max.y + out)),
+        ]
+        .into_iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map_or(p, |(_, q)| q)
+    }
+
+    /// Whether the segment a-b passes through the inside (running along an edge does not).
+    pub fn crosses(&self, a: Vec2, b: Vec2) -> bool {
+        // Liang-Barsky against the area shrunk a hair, so the corners themselves are clear
+        let (lo, hi) = (self.min + 1e-3, self.max - 1e-3);
+        let d = b - a;
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for (p, q) in [(-d.x, a.x - lo.x), (d.x, hi.x - a.x), (-d.y, a.y - lo.y), (d.y, hi.y - a.y)] {
+            if p.abs() < 1e-9 {
+                if q < 0.0 {
+                    return false;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+                if t0 > t1 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The shortest way from `a` to `b` (both outside) around the area: through none, one or
+    /// two of its corners (three for safety), the corners included.
+    fn around(&self, a: Vec2, b: Vec2) -> Vec<Vec2> {
+        let c = [self.min, Vec2::new(self.max.x, self.min.y), self.max, Vec2::new(self.min.x, self.max.y)];
+        let mut tries: Vec<Vec<Vec2>> = vec![vec![]];
+        for i in 0..4 {
+            tries.push(vec![c[i]]);
+            for turn in [1, 3] {
+                tries.push(vec![c[i], c[(i + turn) % 4]]);
+                tries.push(vec![c[i], c[(i + turn) % 4], c[(i + 2 * turn) % 4]]);
+            }
+        }
+        tries
+            .into_iter()
+            .map(|via| std::iter::once(a).chain(via).chain(std::iter::once(b)).collect::<Vec<_>>())
+            .filter(|pts| pts.windows(2).all(|w| !self.crosses(w[0], w[1])))
+            .min_by(|p, q| length(p).total_cmp(&length(q)))
+            .unwrap_or_else(|| vec![a, b])
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Spring {
@@ -119,6 +199,8 @@ pub struct Boat {
     mast: Spring,
     heave: Spring,
     flag: f32,
+    /// A blast's shove on the boat at rest, m/s (world xz); it dies away.
+    drift: Vec2,
     t: f32,
     pose: Pose,
     prev: Pose,
@@ -150,6 +232,7 @@ impl Boat {
             mast: Spring::rest(),
             heave: Spring { x: h, v: 0.0 },
             flag: 0.0,
+            drift: Vec2::ZERO,
             t: 0.0,
             pose,
             prev: pose,
@@ -188,11 +271,13 @@ impl Boat {
     }
 
     /// Sets off for any point of open water along a smooth curve out of its current heading
-    /// (the menu: no channels there). Nothing happens on arrival but a stop.
-    pub fn sail_free(&mut self, to: Vec2) {
+    /// (the menu: no channels there). Nothing happens on arrival but a stop. With `keep_out`
+    /// (the menu's planks) the course goes around it, and a point inside it moves to its edge.
+    pub fn sail_free(&mut self, to: Vec2, keep_out: Option<Area>) {
         if !self.alive() {
             return;
         }
+        let to = keep_out.map_or(to, |area| area.exit(to));
         let d = to.distance(self.pos);
         if d < 0.05 {
             return;
@@ -205,6 +290,16 @@ impl Boat {
                 self.pos * (1.0 - t) * (1.0 - t) + ctrl * 2.0 * t * (1.0 - t) + to * t * t
             })
             .collect();
+        if let Some(area) = keep_out
+            && self.path.windows(2).any(|w| area.crosses(w[0], w[1]))
+        {
+            // out of the way first if it sits in the area, then round its corners
+            let from = area.exit(self.pos);
+            let mut pts = vec![self.pos];
+            pts.extend(area.around(from, to));
+            pts.dedup_by(|a, b| a.distance(*b) < 1e-3);
+            self.path = round_corners(&pts, AROUND);
+        }
         self.len = length(&self.path);
         self.s = 0.0;
         self.door = true;
@@ -212,6 +307,24 @@ impl Boat {
         if self.phase == Phase::Idle {
             self.phase = Phase::WindUp;
             self.phase_t = 0.0;
+        }
+    }
+
+    /// A blast's shove, `push` m/s away from it (world xz): the hull rocks and bobs up, and a
+    /// boat at rest drifts off a little way.
+    pub fn knock(&mut self, push: Vec2) {
+        if !self.alive() {
+            return;
+        }
+        let fwd = Vec2::new(self.yaw.cos(), -self.yaw.sin());
+        let side = Vec2::new(-fwd.y, fwd.x);
+        self.roll.v += push.dot(side) * 1.6;
+        self.pitch.v -= push.dot(fwd) * 1.2;
+        self.heave.v += push.length() * 0.25;
+        if self.phase == Phase::Idle {
+            // it leaves the end of its last course: from here it sits where the drift takes it
+            self.path.clear();
+            self.drift += push;
         }
     }
 
@@ -276,6 +389,10 @@ impl Boat {
         } else {
             tangent = Vec2::new(self.yaw.cos(), -self.yaw.sin());
         }
+        if self.phase == Phase::Idle {
+            self.pos += self.drift * dt;
+        }
+        self.drift *= (-DRIFT_DRAG * dt).exp();
 
         // heading on a spring-like chase: arcs, never snapping
         let want = (-tangent.y).atan2(tangent.x);

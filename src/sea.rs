@@ -30,6 +30,9 @@ const DEBRIS_BUOYANCY: f32 = 2.6;
 const SINK_DEPTH: f32 = -1.9;
 /// Half the thickness the splash test uses for a piece of the wreck.
 const DEBRIS_HALF_H: f32 = 0.03;
+/// Seconds a blast's shove carries a body before the water's drag takes hold again: the drag
+/// on a body sitting deep in the water (a mine) stops it dead within a step.
+const TOSS: f32 = 0.35;
 
 /// The physics side of a floating thing.
 pub struct Body {
@@ -49,6 +52,8 @@ pub struct Body {
     pub prev: ([f32; 3], [f32; 4]),
     /// Seconds into dissolving (negative: still waiting its turn); None while whole.
     pub fade: Option<f32>,
+    /// Seconds left of a blast's toss (see `shove`): the water barely drags it meanwhile.
+    pub tossed: f32,
 }
 
 /// Anything that floats: it has a `Body`, and maybe more (a cell, a menu entry, a size).
@@ -104,7 +109,18 @@ pub fn spawn_anchored(
 ) -> Result<Body, BodyError> {
     let id = world.create_body(shape, &settings.position(RVec3::new(at[0], at[1], at[2])))?;
     let mass = world.body(id).ok().and_then(|b| b.mass()).unwrap_or(1.0);
-    Ok(Body { id, mass, anchored: true, buoyancy, splash: false, home: (at[0], at[2]), sym, prev: (at, [0.0, 0.0, 0.0, 1.0]), fade: None })
+    Ok(Body {
+        id,
+        mass,
+        anchored: true,
+        buoyancy,
+        splash: false,
+        home: (at[0], at[2]),
+        sym,
+        prev: (at, [0.0, 0.0, 0.0, 1.0]),
+        fade: None,
+        tossed: 0.0,
+    })
 }
 
 /// Removes the entries of `list` that `gone` picks, each with its physics body.
@@ -320,11 +336,19 @@ fn float_bodies<T: Floating>(world: &mut PhysicsWorld, ripple: &mut Ripple, swel
             body.splash = false;
             ripple.splash(p.x, p.z, (-v.y * 0.25).min(0.8));
         }
+        let tossed = body.tossed > 0.0;
+        body.tossed = (body.tossed - STEP).max(0.0);
         let fluid = BuoyancySettings::default()
             .surface(RVec3::new(p.x, h, p.z), normal)
             .buoyancy(body.buoyancy)
-            .linear_drag(1.6)
-            .angular_drag(if body.anchored { 2.5 } else { 0.4 });
+            .linear_drag(if tossed { 0.05 } else { 1.6 })
+            .angular_drag(if tossed {
+                0.05
+            } else if body.anchored {
+                2.5
+            } else {
+                0.4
+            });
         let Ok(mut bm) = world.body_mut(body.id) else { continue };
         let _ = bm.apply_buoyancy_impulse(&fluid, gravity, STEP);
         if body.anchored {
@@ -342,6 +366,32 @@ fn float_bodies<T: Floating>(world: &mut PhysicsWorld, ripple: &mut Ripple, swel
         }
     }
     sunk
+}
+
+/// A blast at `at` (world x, z) shoves the bodies of `list` within `reach`: outward by up to
+/// `out` m/s and up by up to `up` m/s, less the further off they are. The lift lands on the near
+/// side, so each one tips away and rocks; one thrown clear splashes as it falls back in. The
+/// water lets go of it for a moment (`TOSS`), so the shove carries. An anchored body keeps its
+/// anchor, whose spring brings it home again.
+pub fn shove<T: Floating>(world: &mut PhysicsWorld, list: &mut [T], at: (f32, f32), reach: f32, out: f32, up: f32) {
+    for entry in list.iter_mut() {
+        let body = entry.body_mut();
+        let Some(p) = position_of(world, body.id) else { continue };
+        let away = glam::Vec2::new(p.x - at.0, p.z - at.1);
+        let d = away.length();
+        if d >= reach {
+            continue;
+        }
+        let f = 1.0 - d / reach;
+        let dir = away.normalize_or(glam::Vec2::X);
+        let m = body.mass;
+        let impulse = Vec3::new(dir.x * out * f * m, up * f * m, dir.y * out * f * m);
+        let near_side = RVec3::new(p.x - dir.x * 0.1, p.y, p.z - dir.y * 0.1);
+        let Ok(mut b) = world.body_mut(body.id) else { continue };
+        let _ = b.add_impulse_at_point(impulse, near_side);
+        body.splash = true;
+        body.tossed = TOSS;
+    }
 }
 
 /// Where `body` is drawn: `a` of the way from its pose before the last step to its pose now.
@@ -405,6 +455,7 @@ fn wreck_pieces(world: &mut PhysicsWorld, pose: &boat::Pose, blast: (f32, f32), 
             sym: 4.0,
             prev: ([p.x, p.y, p.z], [rot.x, rot.y, rot.z, rot.w]),
             fade: None,
+            tossed: 0.0,
         };
         out.push(Debris { body, size });
     }

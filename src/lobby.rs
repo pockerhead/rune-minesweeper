@@ -7,7 +7,7 @@ use glam::Vec2;
 use oxijolt::prelude::math::*;
 use oxijolt::prelude::*;
 
-use crate::boat::Boat;
+use crate::boat::{Area, Boat};
 use crate::game::Dims;
 use crate::sea::{self, Body, Floating, MINE_R, Sea, position_of, spawn_anchored};
 
@@ -33,6 +33,12 @@ pub const ITEM: [f32; 3] = [4.4, 0.14, 0.86];
 const ITEM_GAP: f32 = 1.12;
 /// How close the boat may come to the mine before it goes off.
 const MINE_REACH: f32 = 0.55;
+/// How wide of the planks the boat's course runs, from the hull's middle: half the hull's
+/// length (0.42 m, bow to stern) and room for the planks' bob.
+const PLANK_BERTH: f32 = 0.62;
+/// A picked tile's blast: how far it reaches, and the shove (m/s outward, up) right at it.
+const PICK_REACH: f32 = 7.0;
+const PICK_SHOVE: (f32, f32) = (6.0, 4.5);
 
 /// The line the mine drifts along, across the lower part of the view: from x0 (the view's left
 /// edge) to x1 (its right edge) at depth z.
@@ -160,7 +166,8 @@ impl Lobby {
             };
             self.tiles.push(MenuTile { body, label, action, blown: false });
         }
-        self.sea.boat.sail_free(BASE);
+        let keep_out = self.keep_out();
+        self.sea.boat.sail_free(BASE, keep_out);
     }
 
     /// The menu tile under world point (x, z), with where on it (-1 left edge .. 1 right edge).
@@ -173,6 +180,17 @@ impl Lobby {
             let p = position_of(&self.sea.world, t.body.id)?;
             let (dx, dz) = (x - p.x, z - p.z);
             (dx.abs() < ITEM[0] * 0.5 && dz.abs() < ITEM_GAP * 0.5).then_some((k, dx / (ITEM[0] * 0.5)))
+        })
+    }
+
+    /// The water the menu's planks cover, grown by room for the boat to pass: its course runs
+    /// around it. None without a whole plank up.
+    pub fn keep_out(&self) -> Option<Area> {
+        let half = Vec2::new(ITEM[0] * 0.5, ITEM[2] * 0.5) + PLANK_BERTH;
+        self.tiles.iter().filter(|t| !t.blown && t.body.fade.is_none()).fold(None, |area, t| {
+            let home = Vec2::new(t.body.home.0, t.body.home.1);
+            let (min, max) = (home - half, home + half);
+            Some(area.map_or(Area { min, max }, |a: Area| Area { min: a.min.min(min), max: a.max.max(max) }))
         })
     }
 
@@ -204,6 +222,18 @@ impl Lobby {
                 t.body.fade = Some(-0.15 - 0.07 * (j as f32 - k as f32).abs());
             }
         }
+        // and the blast shoves what floats near it: the mine, the other planks, a wreck, the boat
+        let at = (p.x, p.z);
+        let (out, up) = PICK_SHOVE;
+        let (before, rest) = self.tiles.split_at_mut(k);
+        sea::shove(&mut self.sea.world, before, at, PICK_REACH, out, up);
+        sea::shove(&mut self.sea.world, &mut rest[1..], at, PICK_REACH, out, up);
+        sea::shove(&mut self.sea.world, &mut self.mine, at, PICK_REACH, out, up);
+        sea::shove(&mut self.sea.world, &mut self.sea.debris, at, PICK_REACH, out, up);
+        let away = self.sea.boat.pos - Vec2::new(p.x, p.z);
+        if away.length() < PICK_REACH {
+            self.sea.boat.knock(away.normalize_or(Vec2::Y) * out * 0.4 * (1.0 - away.length() / PICK_REACH));
+        }
     }
 
     /// A tile that only takes a nudge (adjusting a value, a record): it dips and splashes.
@@ -218,7 +248,8 @@ impl Lobby {
     /// A click on open water: the boat sets off for it.
     pub fn sail(&mut self, x: f32, z: f32) {
         self.sea.ripple.splash(x, z, 0.35);
-        self.sea.boat.sail_free(Vec2::new(x, z));
+        let keep_out = self.keep_out();
+        self.sea.boat.sail_free(Vec2::new(x, z), keep_out);
     }
 
     pub fn advance(&mut self, dt: f32) {
@@ -234,17 +265,7 @@ impl Lobby {
         self.sea.blast(x, z, 2.5);
         self.sea.wreck_boat((x, z), self.seed ^ self.sea.time.to_bits() as u64);
         // the blast shoves the menu tiles about without breaking them
-        for t in &self.tiles {
-            let Some(p) = position_of(&self.sea.world, t.body.id) else { continue };
-            let (dx, dz) = (p.x - x, p.z - z);
-            let d = (dx * dx + dz * dz).sqrt();
-            if d < 4.0 {
-                let m = t.body.mass;
-                let k = m * 2.5 * (1.0 - d / 4.0) / d.max(0.3);
-                let push = Vec3::new(dx * k, m * 2.0 * (1.0 - d / 4.0), dz * k);
-                let _ = self.sea.world.body_mut(t.body.id).and_then(|mut b| b.add_impulse(push));
-            }
-        }
+        sea::shove(&mut self.sea.world, &mut self.tiles, (x, z), 4.0, 2.5, 2.0);
         self.respawn_at = Some(self.sea.time + RESPAWN);
     }
 
@@ -252,7 +273,8 @@ impl Lobby {
         self.sea.clear_debris();
         // the boat sails back in from beyond the top of the view, the mine bobs up again
         self.sea.boat = Boat::at(BASE + Vec2::new(-1.5, -4.0));
-        self.sea.boat.sail_free(BASE);
+        let keep_out = self.keep_out();
+        self.sea.boat.sail_free(BASE, keep_out);
         self.spawn_mine(-1.6);
         self.respawn_at = None;
     }
@@ -316,6 +338,37 @@ pub mod tests {
         }
     }
 
+    /// The water the boat's hull takes, as a circle around its middle: half its length.
+    const HULL_R: f32 = 0.42;
+
+    /// How far the boat's hull runs into plank `t`, and where (world xz). None while clear, for
+    /// a plank on its way out (blown, melting) or still surfacing deep under water, and with no
+    /// boat.
+    fn hull_contact(l: &Lobby, t: &MenuTile) -> Option<(f32, Vec2)> {
+        if !l.sea.boat.alive() || t.blown || t.body.fade.is_some() {
+            return None;
+        }
+        let b = l.sea.world.body(t.body.id).ok()?;
+        let p = sea::xyz(b.position());
+        if p.y < -0.3 {
+            return None;
+        }
+        let q = b.rotation();
+        let x = glam::Quat::from_xyzw(q.x, q.y, q.z, q.w) * glam::Vec3::X;
+        // the plank's own axes on the water: along it, and across it
+        let along = Vec2::new(x.x, x.z).normalize_or(Vec2::X);
+        let across = Vec2::new(-along.y, along.x);
+        let d = l.sea.boat.pos - Vec2::new(p.x, p.z);
+        let local = Vec2::new(d.dot(along), d.dot(across));
+        let half = Vec2::new(ITEM[0] * 0.5, ITEM[2] * 0.5);
+        let edge = local.clamp(-half, half);
+        let gap = (local - edge).length();
+        let at = Vec2::new(p.x, p.z) + along * edge.x + across * edge.y;
+        // the hull's middle over the plank counts as deeper than any gap
+        let depth = if gap > 0.0 { HULL_R - gap } else { HULL_R };
+        (depth > 0.0).then_some((depth, at))
+    }
+
     fn menu(n: usize) -> Vec<(String, Action)> {
         (0..n).map(|k| (format!("Item {k}"), if k == 0 { Action::Play } else { Action::Back })).collect()
     }
@@ -346,6 +399,91 @@ pub mod tests {
         assert!(l.mine.is_empty() && !l.sea.debris.is_empty());
         run(&mut l, RESPAWN, "respawn");
         assert!(l.sea.boat.alive() && l.mine.len() == 1 && l.sea.debris.is_empty(), "both are back");
+    }
+
+    /// Clicks all over the water, picks and new menus for minutes on end: the hull never runs
+    /// into a plank that is up, it sails around them.
+    #[test]
+    fn the_boat_sails_around_the_planks_never_through_them() {
+        let mut l = Lobby::new(3);
+        l.set_lane(Lane { x0: -6.0, x1: 6.0, z: 4.2 });
+        l.set_menu(menu(3));
+        let mut rng = fastrand::Rng::with_seed(7);
+        let (mut sails, mut across) = (0, 0);
+        for round in 0..80 {
+            match rng.u32(0..10) {
+                // a new menu of three to five, or a pick that blows its tile first
+                0 => l.set_menu(menu(rng.usize(3..=5))),
+                1 if !l.tiles.is_empty() => {
+                    l.blow(rng.usize(0..l.tiles.len()));
+                    run(&mut l, 0.6, "blown");
+                    l.set_menu(menu(rng.usize(3..=5)));
+                }
+                _ => {
+                    let to = Vec2::new(rng.f32() * 11.0 - 5.5, rng.f32() * 9.0 - 4.5);
+                    if l.item_at(to.x, to.y).is_none() {
+                        // straight there would cross the planks
+                        across += usize::from(l.keep_out().is_some_and(|a| a.crosses(l.sea.boat.pos, to)));
+                        sails += 1;
+                        l.sail(to.x, to.y);
+                    }
+                }
+            }
+            for _ in 0..rng.usize(60..200) {
+                l.step();
+                for (k, t) in l.tiles.iter().enumerate() {
+                    if let Some((depth, at)) = hull_contact(&l, t) {
+                        panic!("round {round}: the hull at {} runs {depth:.3} m into plank {k} at {at}", l.sea.boat.pos);
+                    }
+                }
+            }
+        }
+        assert!(sails > 40 && across > 10, "too few trips past the planks: {sails} sails, {across} across");
+    }
+
+    /// A pick goes off like a mine: what floats near it, the mine, the boat and the other
+    /// planks, is shoved away, and the mine's anchor brings it back calmly.
+    #[test]
+    fn a_picks_blast_shoves_the_mine_and_the_boat_away() {
+        let mut l = Lobby::new(4);
+        l.set_menu(menu(4));
+        run(&mut l, 2.5, "surfacing");
+        let last = l.tiles.len() - 1;
+        let tile = |l: &Lobby, k: usize| position_of(&l.sea.world, l.tiles[k].body.id).unwrap();
+        let blast = tile(&l, last);
+        // the mine's lane runs just below the lowest plank, the boat is moored off to its side
+        l.set_lane(Lane { x0: blast.x + 0.4, x1: blast.x + 0.4, z: DRIFT_MIN_Z });
+        l.sail(blast.x - 3.4, blast.z + 0.2);
+        run(&mut l, 4.0, "moored");
+        let flat = |p: glam::Vec3| Vec2::new(p.x - blast.x, p.z - blast.z).length();
+        let mine = |l: &Lobby| position_of(&l.sea.world, l.mine[0].id).unwrap();
+        let from_blast = |l: &Lobby| l.sea.boat.pos.distance(Vec2::new(blast.x, blast.z));
+        let (mine0, boat0, plank0) = (mine(&l), from_blast(&l), tile(&l, last - 1));
+        assert!(flat(mine0) < 3.0 && boat0 < 4.0 && l.sea.boat.alive(), "set up near the blast: mine {mine0}, boat {boat0} m off");
+
+        l.blow(last);
+        let (mut far, mut high) = (0.0f32, f32::MIN);
+        for _ in 0..30 {
+            l.step();
+            far = far.max(flat(mine(&l)) - flat(mine0));
+            high = high.max(mine(&l).y - mine0.y);
+        }
+        assert!(far > 0.4 && high > 0.2, "the mine went {far:.2} m further off and {high:.2} m up");
+        assert!(from_blast(&l) > boat0 + 0.1, "the boat drifted {:.2} m off", from_blast(&l) - boat0);
+        assert!(flat(tile(&l, last - 1)) > flat(plank0) + 0.1, "the next plank was shoved off");
+
+        // its anchor brings the mine back to the lane without swinging it about
+        let off = |l: &Lobby| {
+            let (p, (hx, hz)) = (mine(l), l.mine[0].home);
+            Vec2::new(p.x - hx, p.z - hz).length()
+        };
+        let mut later = Vec::new();
+        for _ in 0..(4.0 / STEP) as usize {
+            l.step();
+            later.push(off(&l));
+        }
+        assert!(later[later.len() - 1] < 0.25, "the mine is {:.2} m off its lane", later[later.len() - 1]);
+        assert!(later[later.len() / 2..].iter().all(|&d| d < 0.5), "the mine still swings about");
     }
 
     /// Menus replaced, picks blown, the boat blown up and respawned, many times over: the
