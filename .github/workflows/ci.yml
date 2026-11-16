@@ -20,6 +20,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config cmake libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libvulkan-dev
-      # the rules, the water, the boat and the menu world are plain CPU code: no GPU needed
+            libxrandr-dev libxi-dev libvulkan-dev mesa-vulkan-drivers
+      # the rules, the water, the boat and the menu world are plain CPU code; the one GPU test
+      # (labels reach the planks) runs on Mesa's software Vulkan (lavapipe)
       - run: cargo test --locked
