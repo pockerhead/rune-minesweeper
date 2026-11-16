@@ -1,0 +1,31 @@
+name: Leaderboard score
+description: A win for the world leaderboard. The game fills this in; submit it as it is.
+title: "Score: "
+labels: ["score"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The game filled this form in from your win. Submit it as it is: a workflow replays the
+        run code with the game's rules, then puts your time on the leaderboard (or says why not)
+        and closes the issue. Your GitHub name is the name on the board.
+  - type: input
+    id: level
+    attributes:
+      label: Level
+    validations:
+      required: true
+  - type: input
+    id: time
+    attributes:
+      label: Time
+      description: The time the run code records, from your first move to the last.
+    validations:
+      required: true
+  - type: input
+    id: run
+    attributes:
+      label: Run code
+      description: Every open and flag of the game, with its time. The leaderboard trusts only this.
+    validations:
+      required: true

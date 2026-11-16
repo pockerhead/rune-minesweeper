@@ -74,6 +74,8 @@ pub enum Action {
     Show,
     /// The sea's level: each pick turns it to the next one, the tile stays.
     Sea,
+    /// The world leaderboard's screen.
+    Leaderboard,
 }
 
 /// A menu entry on its floating tile.

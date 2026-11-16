@@ -619,6 +619,37 @@ mod tests {
         }
     }
 
+    /// The leaderboard's verifier times the boat's sail between two opens from its top speed
+    /// and from where it is when a cell opens: inside that cell's square (its edge included).
+    /// A faster boat, or one that opens cells from further off, would make it turn played
+    /// wins down.
+    #[test]
+    fn the_verifier_knows_how_fast_the_boat_is_and_where_it_opens_a_cell() {
+        use mines_rules::replay::BOAT_TOP_SPEED;
+        const { assert!(VMAX <= BOAT_TOP_SPEED, "the boat got faster than the verifier allows") };
+        // sent off to random cells from where it is, and now and then re-routed half way
+        let mut rng = fastrand::Rng::with_seed(7);
+        for dims in [TEST_DIMS, Dims { w: 16, h: 16 }, Dims { w: 30, h: 16 }] {
+            let mut ripple = Ripple::new();
+            let mut boat = Boat::new(dims);
+            let mut doors = 0;
+            for k in 0..30_000 {
+                if boat.phase == Phase::Idle || rng.u32(0..200) == 0 {
+                    boat.sail_to(rng.usize(0..dims.count()), dims);
+                }
+                if let Some(Event::Door(cell)) =
+                    boat.step(1.0 / 60.0, water::Swell { clock: k as f32 / 60.0, ..Default::default() }, &mut ripple)
+                {
+                    let (x, z) = dims.center(cell);
+                    let off = (boat.pos - Vec2::new(x, z)).abs();
+                    assert!(off.max_element() <= 0.5 + 1e-3, "{dims:?}: cell {cell} opened from {off} off its middle");
+                    doors += 1;
+                }
+            }
+            assert!(doors > 60, "{dims:?}: only {doors} cells reached");
+        }
+    }
+
     #[test]
     fn the_route_never_starts_by_going_away_from_the_target() {
         // from the middle of an opened cell, to a cell to the right of it

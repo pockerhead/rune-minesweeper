@@ -20,6 +20,14 @@ oxijolt = { git = "https://github.com/pockerhead/oxijolt", rev = "6a96af972a09a4
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = { version = "0.30", features = ["bytemuck"] }
 fastrand = "2"
+# the rules, run codes and the leaderboard, shared with the leaderboard's verifier
+mines-rules = { path = "rules" }
+
+# The world leaderboard on desktop: a small blocking HTTP client run on a background thread.
+# TLS by rustls (ring) with Mozilla's roots built in, so no OpenSSL on Linux; no gzip, cookies
+# or JSON (the rules crate parses the file). The browser build fetches with `fetch` instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12"] }
@@ -30,7 +38,12 @@ wgpu = { version = "~30.0.1", default-features = false, features = ["std", "park
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "~30.0.1", default-features = false, features = ["std", "wgsl", "webgpu"] }
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Storage", "console", "Location", "Navigator"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window", "Storage", "console", "Location", "Navigator", "Response",
+    "AbortController", "AbortSignal", "RequestInit", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamReadResult",
+] }
 
 # Rune is pre-release: pinned to a revision of its `dev` branch. Rune patches a few crates with
 # its own versions (vendor/ in its repository) and asks apps built on it to apply the same patches.

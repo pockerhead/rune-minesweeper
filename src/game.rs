@@ -12,60 +12,8 @@ pub const TILE_HALF: [f32; 3] = [0.34, 0.07, 0.34];
 /// Seconds between the rings of a flood: the tiles dissolve outward, not all at once.
 const RING_DELAY: f32 = 0.04;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Status {
-    Playing,
-    Lost,
-    Won,
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Cell {
-    pub mine: bool,
-    pub open: bool,
-    pub flag: bool,
-    pub near: u8,
-}
-
-/// A board's size in cells: `w` along x, `h` along z, centred on the origin, one unit a cell.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Dims {
-    pub w: usize,
-    pub h: usize,
-}
-
-impl Dims {
-    pub fn count(self) -> usize {
-        self.w * self.h
-    }
-
-    /// Half the board's width and depth.
-    pub fn half(self) -> (f32, f32) {
-        (self.w as f32 * 0.5, self.h as f32 * 0.5)
-    }
-
-    pub fn center(self, i: usize) -> (f32, f32) {
-        let (hw, hh) = self.half();
-        ((i % self.w) as f32 + 0.5 - hw, (i / self.w) as f32 + 0.5 - hh)
-    }
-
-    pub fn cell_at(self, x: f32, z: f32) -> Option<usize> {
-        let (hw, hh) = self.half();
-        let (i, j) = ((x + hw).floor(), (z + hh).floor());
-        (0.0..self.w as f32).contains(&i).then_some(())?;
-        (0.0..self.h as f32).contains(&j).then_some(())?;
-        Some(i as usize + j as usize * self.w)
-    }
-
-    pub fn neighbours(self, i: usize) -> impl Iterator<Item = usize> {
-        let (w, h) = (self.w as isize, self.h as isize);
-        let (x, y) = ((i % self.w) as isize, (i / self.w) as isize);
-        (-1..=1)
-            .flat_map(move |dy| (-1..=1).map(move |dx| (x + dx, y + dy)))
-            .filter(move |&(nx, ny)| (nx, ny) != (x, y) && (0..w).contains(&nx) && (0..h).contains(&ny))
-            .map(move |(nx, ny)| (nx + ny * w) as usize)
-    }
-}
+pub use mines_rules::board::{Board, Dims, Status};
+pub use mines_rules::run::Kind;
 
 /// A floating tile over a board cell.
 pub struct Tile {
@@ -83,30 +31,31 @@ impl Floating for Tile {
 }
 
 pub struct Game {
-    pub dims: Dims,
-    /// Mines on this board.
-    pub mine_total: usize,
-    pub cells: Vec<Cell>,
-    pub status: Status,
-    /// Mines are laid out when the boat reaches its first cell, around that cell.
-    placed: bool,
-    /// The cell whose mine went off.
-    pub boom: Option<usize>,
+    /// The rules' side of the game: cells, mines, status (`Game` reads as its board).
+    board: Board,
     pub sea: Sea,
     pub tiles: Vec<Tile>,
     pub mines: Vec<Body>,
     mine_shape: Shape,
-    seed: u64,
     /// A mine cell whose tile has dissolved: the boat sails to its centre, then it goes off.
     doom: Option<usize>,
     /// Water-clock time at which each open cell's number cloud appears (as its tile melts).
     pub cloud_at: Vec<f32>,
+    /// What the player did, as the rules saw it: each open and flag that changed the board,
+    /// at its water-clock time (`Sea::now`). A run code is made from it.
+    pub moves: Vec<(Kind, usize, f64)>,
+}
+
+impl std::ops::Deref for Game {
+    type Target = Board;
+    fn deref(&self) -> &Board {
+        &self.board
+    }
 }
 
 impl Game {
     /// A `dims` board with `mines` mines. Tiles start a little under water and bob up.
     pub fn with(dims: Dims, mines: usize, seed: u64) -> Game {
-        let mines = mines.min(dims.count().saturating_sub(9));
         let mut sea = Sea::new(dims.w.max(dims.h) as f32 * 0.5 + 3.0, Boat::new(dims));
         let tile_shape = Shape::new_box(Vec3::new(TILE_HALF[0], TILE_HALF[1], TILE_HALF[2])).expect("tile shape");
         let tiles = (0..dims.count())
@@ -119,39 +68,15 @@ impl Game {
             })
             .collect();
         Game {
-            dims,
-            mine_total: mines,
-            cells: vec![Cell::default(); dims.count()],
-            status: Status::Playing,
-            placed: false,
-            boom: None,
+            board: Board::new(dims, mines, seed),
             sea,
             tiles,
             mines: Vec::new(),
             mine_shape: Shape::new_sphere(MINE_R).expect("mine shape"),
-            seed,
             doom: None,
             cloud_at: vec![f32::INFINITY; dims.count()],
+            moves: Vec::new(),
         }
-    }
-
-    /// Lays the mines out anywhere but `safe` and its neighbours.
-    fn place(&mut self, safe: usize) {
-        let mut rng = fastrand::Rng::with_seed(self.seed);
-        let dims = self.dims;
-        let keep: Vec<usize> = std::iter::once(safe).chain(dims.neighbours(safe)).collect();
-        let mut left = self.mine_total;
-        while left > 0 {
-            let i = rng.usize(0..dims.count());
-            if !self.cells[i].mine && !keep.contains(&i) {
-                self.cells[i].mine = true;
-                left -= 1;
-            }
-        }
-        for i in 0..dims.count() {
-            self.cells[i].near = dims.neighbours(i).filter(|&n| self.cells[n].mine).count() as u8;
-        }
-        self.placed = true;
     }
 
     /// A left click on the water over cell `i`: a small splash, and the boat sets off for it.
@@ -172,8 +97,8 @@ impl Game {
             return;
         }
         // the first cell the boat reaches is the one kept clear, whichever was clicked first
-        if !self.placed {
-            self.place(i);
+        if !self.board.placed() {
+            self.board.place(i);
         }
         if self.cells[i].mine {
             self.dissolve(i, 0.0);
@@ -193,16 +118,13 @@ impl Game {
 
     /// Opens cell `i` at once (flood fill through zeros); a mine loses the game.
     pub fn open(&mut self, i: usize) {
-        if self.status != Status::Playing || self.cells[i].flag || (self.cells[i].open && !self.cells[i].mine) {
+        let was = self.status;
+        let opened = self.board.open(i);
+        if opened.is_empty() && !(was == Status::Playing && self.status == Status::Lost) {
             return;
         }
-        if !self.placed {
-            self.place(i);
-        }
-        if self.cells[i].mine {
-            self.cells[i].open = true;
-            self.status = Status::Lost;
-            self.boom = Some(i);
+        self.moves.push((Kind::Open, i, self.sea.now()));
+        if self.status == Status::Lost {
             self.explode(i);
             self.sea.wreck_boat(self.dims.center(i), self.seed);
             // tiles the blast didn't reach still cover mines: toss them so every mine shows
@@ -214,24 +136,12 @@ impl Game {
             self.raise_mines();
             return;
         }
-        // breadth first, so the flood dissolves outward in rings (a stagger, not all at once)
-        let mut queue = std::collections::VecDeque::from([(i, 0u32)]);
-        while let Some((c, ring)) = queue.pop_front() {
-            if self.cells[c].open || self.cells[c].flag {
-                continue;
-            }
-            self.cells[c].open = true;
+        // the flood dissolves outward in rings (a stagger, not all at once)
+        for (c, ring) in opened {
             self.dissolve(c, ring as f32 * RING_DELAY);
             self.cloud_at[c] = self.sea.time + ring as f32 * RING_DELAY + sea::FADE * 0.55;
-            if self.cells[c].near == 0 {
-                queue.extend(self.dims.neighbours(c).filter(|&n| !self.cells[n].open && !self.cells[n].mine).map(|n| (n, ring + 1)));
-            }
         }
-        if self.cells.iter().filter(|c| c.open).count() == self.dims.count() - self.mine_total {
-            self.status = Status::Won;
-            for c in self.cells.iter_mut().filter(|c| c.mine) {
-                c.flag = true;
-            }
+        if self.status == Status::Won {
             self.raise_mines();
         }
     }
@@ -241,8 +151,8 @@ impl Game {
     pub fn toggle_flag(&mut self, i: usize) {
         let (x, z) = self.dims.center(i);
         self.sea.ripple.splash(x, z, 0.35);
-        if self.status == Status::Playing && !self.cells[i].open && self.doom != Some(i) {
-            self.cells[i].flag = !self.cells[i].flag;
+        if self.doom != Some(i) && self.board.toggle_flag(i) {
+            self.moves.push((Kind::Flag, i, self.sea.now()));
             if let Some(t) = self.tiles.iter().find(|t| t.cell == i) {
                 let m = t.body.mass;
                 let _ = self.sea.world.body_mut(t.body.id).and_then(|mut b| b.add_impulse(Vec3::new(0.0, -1.2 * m, 0.0)));
@@ -298,7 +208,7 @@ impl Game {
     }
 
     fn raise_mines(&mut self) {
-        for cell in (0..self.dims.count()).filter(|&c| self.cells[c].mine) {
+        for cell in (0..self.board.dims.count()).filter(|&c| self.board.cells[c].mine) {
             let (x, z) = self.dims.center(cell);
             let depth = if Some(cell) == self.boom { -0.4 } else { -1.4 - (cell % 3) as f32 * 0.25 };
             let settings = BodySettings::new_dynamic();
@@ -415,6 +325,153 @@ pub mod tests {
             g.step();
             n += 1;
         }
+    }
+
+    /// A quick player who can see the mines: as soon as the boat has opened its cell, it is
+    /// sent on to the nearest closed safe cell; every few cells a mine nearby gets a flag (and
+    /// now and then loses it again). Plays until the board is won, at most `limit` steps.
+    pub fn play_to_a_win(dims: Dims, mines: usize, seed: u64, limit: usize) -> Game {
+        play_to_a_win_with(dims, mines, seed, limit, |g, _| g.step())
+    }
+
+    /// `play_to_a_win`, the world moved on by `tick` (given the game and the tick's number).
+    pub fn play_to_a_win_with(dims: Dims, mines: usize, seed: u64, limit: usize, mut tick: impl FnMut(&mut Game, usize)) -> Game {
+        let mut g = Game::with(dims, mines, seed);
+        let middle = dims.w * (dims.h / 2) + dims.w / 2;
+        g.click(middle);
+        let mut n = 0;
+        while g.status == Status::Playing && n < limit {
+            tick(&mut g, n);
+            n += 1;
+            if g.sea.boat.target.is_some_and(|t| !g.cells[t].open) || !g.board.placed() {
+                continue;
+            }
+            let near = |c: usize| {
+                let (x, z) = dims.center(c);
+                (glam::Vec2::new(x, z) - g.sea.boat.pos).length_squared()
+            };
+            let closed = |want_mine: bool| {
+                (0..dims.count())
+                    .filter(|&c| !g.cells[c].open && !g.cells[c].flag && g.cells[c].mine == want_mine)
+                    .min_by(|&a, &b| near(a).total_cmp(&near(b)))
+            };
+            let (mine, next) = (closed(true).filter(|_| n % 3 == 0), closed(false));
+            if let Some(m) = mine {
+                g.toggle_flag(m);
+                if n % 4 == 0 {
+                    g.toggle_flag(m);
+                    g.toggle_flag(m);
+                }
+            }
+            if let Some(c) = next {
+                g.click(c);
+            }
+        }
+        g
+    }
+
+    fn level_of(dims: Dims) -> u8 {
+        mines_rules::LEVELS.iter().position(|l| l.dims == dims).expect("a ranked level") as u8
+    }
+
+    fn run_of(g: &Game) -> mines_rules::run::Run {
+        mines_rules::run::Run::from_times(level_of(g.dims), [0, 3, 0], g.seed, g.fingerprint(), &g.moves)
+    }
+
+    /// The game lays its boards as v0.3.0 did (the rules' `GOLDEN` boards, measured on the
+    /// game before the rules moved to their own crate).
+    #[test]
+    fn the_game_lays_its_boards_as_before() {
+        let golden = [
+            (Dims { w: 9, h: 9 }, 10, 0x5eed, 40, 0x1df1_a882u32, 53),
+            (Dims { w: 16, h: 16 }, 40, 7, 0, 0x109d_c7d0, 108),
+            (Dims { w: 30, h: 16 }, 99, 0xdead_beef, 240, 0xb3ad_4752, 9),
+            (Dims { w: 30, h: 16 }, 99, 1, 479, 0x565c_3565, 12),
+        ];
+        for (dims, mines, seed, first, fingerprint, opened) in golden {
+            let mut g = Game::with(dims, mines, seed);
+            g.open(first);
+            assert_eq!(g.cells.iter().filter(|c| c.open).count(), opened, "{dims:?} seed {seed:#x}");
+            assert_eq!(g.fingerprint(), fingerprint, "{dims:?} seed {seed:#x}");
+        }
+    }
+
+    /// A won game, boat and all, recorded and replayed by the leaderboard's verifier: it is a
+    /// win there too, in the time of its last move. And the boat never opens two cells closer
+    /// together than the verifier allows, nor faster than its sail floor (`sail_ms`).
+    #[test]
+    fn a_played_win_replays_in_the_verifier() {
+        use mines_rules::replay::{MIN_OPEN_GAP_MS, sail_ms, verify};
+        let mut quickest = u32::MAX;
+        // the least time an open came after the sail floor, and the sail's real time over it
+        let (mut spare, mut ratio) = (i64::MAX, f64::MAX);
+        for (k, l) in mines_rules::LEVELS.iter().enumerate() {
+            for seed in 0..[3u64, 2, 1][k] {
+                let g = play_to_a_win(l.dims, l.mines, seed, 40_000);
+                assert_eq!(g.status, Status::Won, "{} seed {seed}", l.name);
+                let run = run_of(&g);
+                assert!(run.moves.iter().any(|m| m.kind == Kind::Flag), "the player flagged");
+                let back = mines_rules::run::Run::decode(&run.encode()).expect("the code reads back");
+                let v = verify(&back).unwrap_or_else(|e| panic!("{} seed {seed}: {e}", l.name));
+                assert_eq!(v.time_ms, run.time_ms());
+                let opens: Vec<(u32, usize)> = run.moves.iter().filter(|m| m.kind == Kind::Open).map(|m| (m.ms, m.cell)).collect();
+                quickest = quickest.min(opens.windows(2).map(|w| w[1].0 - w[0].0).min().unwrap_or(u32::MAX));
+                for w in opens.windows(2) {
+                    let (gap, floor) = (w[1].0 - w[0].0, sail_ms(l.dims, w[0].1, w[1].1));
+                    spare = spare.min(gap as i64 - floor as i64);
+                    if floor > 0 {
+                        ratio = ratio.min(gap as f64 / floor as f64);
+                    }
+                }
+                let secs = run.time_ms() as f64 / 1000.0;
+                println!("{} seed {seed}: {} moves, {secs:.2} s, {} byte code", l.name, run.moves.len(), run.encode().len());
+            }
+        }
+        println!("quickest open after open: {quickest} ms; least time over the sail floor {spare} ms, {ratio:.2}x the floor");
+        assert!(quickest >= MIN_OPEN_GAP_MS * 2, "the boat opened two cells {quickest} ms apart");
+        assert!(spare > 0 && ratio > 1.1, "the sail floor is too close to the boat");
+    }
+
+    /// The same on the app's clock: frames of uneven length (8 to 50 ms) step the water, and
+    /// the moves are timed with the frame's remainder (`Sea::now`). The verifier still takes
+    /// every win.
+    #[test]
+    fn a_win_played_in_uneven_frames_replays_in_the_verifier() {
+        for (k, l) in mines_rules::LEVELS.iter().enumerate() {
+            let mut rng = fastrand::Rng::with_seed(k as u64);
+            let g = play_to_a_win_with(l.dims, l.mines, 1, 40_000, |g, _| g.advance(0.008 + rng.f32() * 0.042));
+            assert_eq!(g.status, Status::Won, "{}", l.name);
+            let run = run_of(&g);
+            let v = mines_rules::replay::verify(&run).unwrap_or_else(|e| panic!("{}: {e}", l.name));
+            assert_eq!(v.time_ms, run.time_ms());
+        }
+    }
+
+    /// A board a click or two clears, played for real: a win, but not one the leaderboard ranks.
+    #[test]
+    fn a_win_on_an_easy_board_is_not_ranked() {
+        let l = &mines_rules::LEVELS[0];
+        let g = play_to_a_win(l.dims, l.mines, 16219, 40_000);
+        assert_eq!(g.status, Status::Won);
+        assert!(g.three_bv() < l.min_3bv);
+        assert_eq!(mines_rules::replay::verify(&run_of(&g)).unwrap_err(), mines_rules::replay::Reject::EasyBoard);
+    }
+
+    /// A game the player lost replays to a loss; one stopped half way is not a win.
+    #[test]
+    fn a_played_loss_is_refused_by_the_verifier() {
+        use mines_rules::replay::{Reject, verify};
+        let mut g = Game::with(WIDE, 99, 4);
+        g.click(200);
+        run_until_moored(&mut g, 1500);
+        let unfinished = run_of(&g);
+        assert_eq!(verify(&unfinished).unwrap_err(), Reject::Unfinished);
+        let m = (0..g.dims.count()).find(|&c| g.cells[c].mine).expect("a mine");
+        g.click(m);
+        run_until_moored(&mut g, 1500);
+        assert_eq!(g.status, Status::Lost);
+        assert_eq!(g.moves.last().map(|m| (m.0, m.1)), Some((Kind::Open, m)), "the fatal open is recorded");
+        assert_eq!(verify(&run_of(&g)).unwrap_err(), Reject::Lost);
     }
 
     #[test]

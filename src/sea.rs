@@ -197,6 +197,12 @@ impl Sea {
         self.last_cursor = None;
     }
 
+    /// The water clock as of the last frame: the time stepped plus the part not stepped yet.
+    /// It never runs back, so it orders the player's moves between frames and within them.
+    pub fn now(&self) -> f64 {
+        self.time as f64 + self.acc as f64
+    }
+
     /// Adds `dt` seconds of wall time and returns how many fixed steps are now due.
     pub fn due_steps(&mut self, dt: f32) -> usize {
         self.acc = (self.acc + dt.min(0.1)).min(STEP * 5.0);

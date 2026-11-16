@@ -50,6 +50,35 @@ The menu is part of the world too. Its items are floating tiles, and picking one
 
 ![The menu](docs/menu.gif)
 
+## Leaderboard
+
+Win a Beginner, Intermediate or Expert game and the end banner offers **Submit to the world leaderboard**. It opens a GitHub issue form with your level, time and a *run code* already filled in (you need a GitHub account). Submit it as it is. A workflow replays the run code with the game's own rules, move by move on the same board, and if it is a real win in a believable time, your time goes on the board below under your GitHub name. The workflow comments on the issue with your place, or with the reason the run was not ranked, and closes it. Custom games are not ranked.
+
+The time on the leaderboard runs from your first move to your last on the game's water clock, so it can be a little shorter than the banner's, which counts from when the board appears. The board keeps the best time of each player per level, top 50, in [`leaderboard/leaderboard.json`](leaderboard/leaderboard.json). The game shows it under **Records → World leaderboard**, next to your own best times.
+
+What the check holds a run to:
+
+- **The boat's time.** The boat sails to every cell it opens, so two opens can be no closer in time than its top speed allows across the gap between the two cells (and never under 40 ms). The floor is set below what the real boat does: the closest a played game came to it was 1.24 times the floor.
+- **A board worth ranking.** The game picks the board from a seed, so the easiest ones could be searched for. A board is ranked only if its 3BV (the fewest clicks that clear it) is at least 8 on Beginner, 45 on Intermediate and 140 on Expert: the easiest 5% of boards, measured over 200,000 random ones, are not. On such a board the win banner says "Unranked board" and offers no submit.
+- **One player per board.** Every accepted run is kept in [`leaderboard/history.json`](leaderboard/history.json), so a run code copied from someone's issue gets nowhere, even after their entry has left the top 50.
+
+What it cannot stop: without a server, a program that knows the board (the seed is in the run code) can play a perfect game at the boat's floor. On boards found by trying 20,000 seeds that is about 0.4 s on Beginner, 6 s on Intermediate and 20 s on Expert, where a bot that steers the real boat to the nearest cell takes about 6, 25 and 63 s. Times near those floors are worth a look before trusting them.
+
+<!-- leaderboard:start -->
+**Beginner**
+
+No scores yet.
+
+**Intermediate**
+
+No scores yet.
+
+**Expert**
+
+No scores yet.
+
+<!-- leaderboard:end -->
+
 ## How it is made
 
 | Piece | What it does |
@@ -97,13 +126,17 @@ cargo run --release -- --snap shot.png --at 3 --size 1280x800 --scene expert
 src/main.rs      screens, menu, input, the compositor that ties Rune and the 3D world together
 src/scene.rs     turns the game or the menu world into instances and shader uniforms
 src/sea.rs       what both worlds share: physics, water, the boat, debris, blasts
-src/game.rs      the rules and board sizes
+src/game.rs      the board afloat: the rules' moves turned into melting tiles and blasts
+src/world.rs     the world leaderboard, fetched in the background
 src/lobby.rs     the menu's world
 src/records.rs   best times, in the platform's data folder
 src/boat.rs      routing through the channels and the boat's animation
 src/ripple.rs    the interactive water
 src/gfx.rs       wgpu passes, meshes, instancing
 src/shaders/     WGSL: water, lit meshes, clouds, blit
+rules/           the rules without the sea (mine placement, flood, win), run codes, their
+                 replay and the leaderboard, plus verify-score, the leaderboard workflow's checker
+leaderboard/     the world leaderboard's data
 ```
 
 ## Credits

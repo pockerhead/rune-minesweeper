@@ -1,4 +1,5 @@
 /target
+/rules/target
 *.mp4
 *.png
 !docs/*.png

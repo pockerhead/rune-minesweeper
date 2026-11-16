@@ -19,6 +19,7 @@ mod scene;
 mod sea;
 mod settings;
 mod water;
+mod world;
 
 use glam::{Vec2, Vec3};
 use rune::compose::{Compositor, Frame};
@@ -32,10 +33,14 @@ use camera::{Stage, View};
 use game::{Dims, Game, Status};
 use gfx::Gpu;
 use lobby::{Action, Lobby};
+use mines_rules::replay::Reject;
+use mines_rules::run::Run;
+use mines_rules::{LEVELS, fmt_ms};
 use pinch::Touches;
 use records::Records;
 use settings::Settings;
 use water::SeaLevel;
+use world::World;
 
 const BOARD_MARK: u32 = 1;
 /// How far down the menu's view the mine drifts across (0 top, 1 bottom).
@@ -52,25 +57,13 @@ const END_HOLD: f64 = 1.2;
 const BAR: f32 = 50.5;
 const ONE_ROW: f32 = 1000.0;
 
-struct Level {
-    key: &'static str,
-    name: &'static str,
-    dims: Dims,
-    mines: usize,
-}
-
-const LEVELS: [Level; 3] = [
-    Level { key: "beginner", name: "Beginner", dims: Dims { w: 9, h: 9 }, mines: 10 },
-    Level { key: "intermediate", name: "Intermediate", dims: Dims { w: 16, h: 16 }, mines: 40 },
-    Level { key: "expert", name: "Expert", dims: Dims { w: 30, h: 16 }, mines: 99 },
-];
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Menu {
     Main,
     Levels,
     Custom,
     Records,
+    Leaderboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,6 +101,14 @@ pub struct App {
     /// The custom game: width, height, mines.
     custom: (usize, usize, usize),
     records: Records,
+    /// The world leaderboard, as last fetched.
+    world: World,
+    /// The session's last win on a ranked level that the leaderboard's verifier takes, for
+    /// the leaderboard's form.
+    last_win: Option<Run>,
+    /// Why the last win on a ranked level would not be ranked (the verifier's verdict), so
+    /// the banner says so instead of offering a submit that would be turned down.
+    unranked: Option<Reject>,
     /// The player's settings, and the sea level both worlds float on.
     settings: Settings,
     sea: SeaLevel,
@@ -207,6 +208,10 @@ fn init() -> App {
         _ => Settings::default(),
     };
     let mut app = App::new(seed, records);
+    if !headless {
+        app.world = World::online();
+        app.world.refresh(0.0);
+    }
     app.start_sea(SeaLevel::initial(gfx::sea_knob(), settings.sea(), gfx::handheld()));
     app.settings = settings;
     app
@@ -225,6 +230,9 @@ impl App {
             level: None,
             custom: (12, 12, 24),
             records,
+            world: World::default(),
+            last_win: None,
+            unranked: None,
             settings: Settings::default(),
             sea: SeaLevel::Lively,
             pending: None,
@@ -303,9 +311,12 @@ impl App {
                         (format!("{}   ·   {best}", l.name), Action::Show)
                     })
                     .collect();
+                v.push(("World leaderboard".into(), Action::Leaderboard));
                 v.push(("Back".into(), Action::Back));
                 v
             }
+            // no tiles: the leaderboard's card has the buttons (`leaderboard_panel`)
+            Menu::Leaderboard => Vec::new(),
         }
     }
 
@@ -433,7 +444,10 @@ impl App {
     fn aim(&mut self, warp: bool) {
         let w = self.pointer.and_then(|(x, y)| self.water_at(x, y));
         let (sea, hover) = match (self.screen, self.game.as_mut()) {
-            (Screen::Game, Some(g)) => (&mut g.sea, w.and_then(|(x, z)| g.dims.cell_at(x, z))),
+            (Screen::Game, Some(g)) => {
+                let dims = g.dims;
+                (&mut g.sea, w.and_then(|(x, z)| dims.cell_at(x, z)))
+            }
             _ => (&mut self.lobby.sea, None),
         };
         if warp {
@@ -578,6 +592,7 @@ impl App {
                 self.turn_sea(k);
                 return;
             }
+            Action::Leaderboard => Next::Menu(Menu::Leaderboard),
         };
         self.lobby.blow(k);
         self.pending = Some((next, self.clock + PICK_DELAY));
@@ -640,6 +655,9 @@ impl App {
         self.game = None;
         self.pending = None;
         self.screen = Screen::Menu(menu);
+        if menu == Menu::Leaderboard {
+            self.world.refresh(self.clock);
+        }
         let items = self.menu_items(menu);
         self.lobby.set_menu(items);
         self.reset_view();
@@ -682,6 +700,15 @@ impl App {
             && let Some(level) = self.level
         {
             self.new_record = self.records.offer(level, self.clock - self.started);
+            // the moves as the rules saw them, timed on the water clock, for the leaderboard
+            if let Some((k, _)) = mines_rules::level(level) {
+                let version = mines_rules::run::parse_version(env!("CARGO_PKG_VERSION"));
+                let run = Run::from_times(k as u8, version, g.seed, g.fingerprint(), &g.moves);
+                self.unranked = mines_rules::replay::verify(&run).err();
+                if self.unranked.is_none() {
+                    self.last_win = Some(run);
+                }
+            }
         }
     }
 
@@ -769,6 +796,7 @@ impl App {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(&self.screen).hash(&mut h);
+        (self.screen == Screen::Menu(Menu::Leaderboard)).hash(&mut h);
         self.finished.map(|f| self.clock - f > END_HOLD).hash(&mut h);
         self.glass.hash(&mut h);
         h.finish()
@@ -840,7 +868,17 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             // 400 points wide, or the board's width less a margin (and any notch) on a phone
             let room = (bw - left_inset - right_inset - 24.0).max(1.0);
             let w = room.min(400.0);
-            let h = if since > END_HOLD { 72.0 } else { 52.0 };
+            // a win on a ranked level offers the leaderboard's form once the banner settles, or
+            // says why the leaderboard would not rank it
+            let ranked_win = since > END_HOLD && g.status == Status::Won && s.level.is_some();
+            let submit = ranked_win && s.unranked.is_none() && s.last_win.is_some();
+            let unranked = if ranked_win { s.unranked } else { None };
+            let h = match (since > END_HOLD, submit, unranked.is_some()) {
+                (_, true, _) => 118.0,
+                (_, _, true) => 94.0,
+                (true, false, false) => 72.0,
+                _ => 52.0,
+            };
             // in the middle of the sea, so the most of it shows through the glass
             let [_, _, _, bh] = s.board;
             let mut banner = col()
@@ -867,7 +905,21 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
                 let back = if touch { "Tap to return to the menu" } else { "Click to return to the menu" };
                 banner = banner.child(text(back).font(TextStyle::new(12.5, 500.0)).color(Color::WHITE.alpha(0.7)));
             }
+            if submit {
+                banner = banner.child(submit_button());
+            }
+            if let Some(why) = unranked {
+                let note = match why {
+                    Reject::EasyBoard => "Unranked board: it clears in too few clicks",
+                    _ => "Unranked: the leaderboard's check would not take this run",
+                };
+                banner = banner.child(text(note).key("unranked").font(TextStyle::new(12.5, 600.0)).color(Color::WHITE.alpha(0.85)));
+            }
             board = board.child(banner);
+        }
+        (Screen::Menu(Menu::Leaderboard), _) => {
+            let room = (bw - left_inset - right_inset - 24.0).max(1.0);
+            board = board.child(leaderboard_panel(s, left_inset + 12.0, room));
         }
         _ => {}
     }
@@ -917,6 +969,90 @@ fn menu_button(ink: Color) -> El {
             .center()
             .child(text("Menu").font(TextStyle::new(13.0, 600.0)).color(ink)),
     )
+}
+
+/// A pill button with a finger-sized target round it, as the bar's menu button.
+fn pill(key: &str, label: String, tint: Color, f: impl Fn(&mut App, &mut Tx) + 'static) -> El {
+    el().key(key).h(44.0).center().on_press_tx(f).child(
+        el().h(30.0).px(16.0).radius(15.0).fill(tint).center().child(text(label).font(TextStyle::new(13.0, 650.0)).color(Color::WHITE)),
+    )
+}
+
+/// Opens the score form for the session's last win, filled in, on GitHub.
+fn submit_win(s: &mut App, tx: &mut Tx) {
+    if let Some(run) = &s.last_win {
+        let _ = tx.open_url(&mines_rules::submit::issue_url(run));
+    }
+}
+
+/// The win banner's way to the leaderboard.
+fn submit_button() -> El {
+    let green = rune::color::hex("#5cf0a0").unwrap_or(Color::WHITE).alpha(0.22);
+    pill("submit", "Submit to the world leaderboard".into(), green, submit_win)
+}
+
+/// The world leaderboard over the menu's sea, `room` points wide from `x`: each level's
+/// fastest players (ten side by side, five stacked on a narrow screen), the player's own
+/// best, and the buttons (the screen has no tiles). Until a board has come, or offline, only
+/// the player's own records show.
+fn leaderboard_panel(s: &App, x: f32, room: f32) -> El {
+    let wide = room >= 600.0;
+    let w = room.min(780.0);
+    let rows = if wide { mines_rules::leaderboard::README_ROWS } else { 5 };
+    let ink = Color::WHITE;
+    let muted = Color::WHITE.alpha(0.6);
+    let accent = rune::color::hex("#7fe0c0").unwrap_or(ink);
+    let small = || TextStyle::new(13.0, 500.0);
+    let mut levels = if wide { row().w_full().gap(20.0) } else { col().w_full().gap(12.0) };
+    for l in &LEVELS {
+        let mut c = col().grow(1.0).gap(3.0).child(text(l.name).font(TextStyle::new(15.0, 700.0)).color(ink));
+        if let Some(board) = &s.world.board {
+            let entries = board.entries(l.key);
+            if entries.is_empty() {
+                c = c.child(text("No scores yet").font(small()).color(muted));
+            }
+            for (k, e) in entries.iter().take(rows).enumerate() {
+                let login: String = e.login.chars().take(18).collect();
+                c = c.child(
+                    row()
+                        .w_full()
+                        .gap(6.0)
+                        .child(text(format!("{}.", k + 1)).font(small()).color(muted).w(22.0))
+                        .child(text(login).font(small()).color(ink).grow(1.0))
+                        .child(text(fmt_ms(e.time_ms)).font(small().mono()).color(ink)),
+                );
+            }
+        }
+        let best = s.records.best(l.key).map_or("none yet".to_string(), fmt_time);
+        c = c.child(text(format!("Your best  {best}")).font(TextStyle::new(13.0, 650.0)).color(accent));
+        levels = levels.child(c);
+    }
+    let mut panel = col()
+        .key("leaderboard")
+        .absolute(x + (room - w) * 0.5, 12.0)
+        .w(w)
+        .padding(16.0)
+        .gap(12.0)
+        .radius(BANNER_RADIUS)
+        .backdrop_blur(14.0)
+        .fill(rune::color::hex("#06121a").unwrap_or(Color::BLACK).alpha(0.62))
+        .border_gradient(1.0, Color::WHITE.alpha(0.32), Color::WHITE.alpha(0.06))
+        .child(text("World leaderboard").font(TextStyle::new(17.0, 700.0)).color(ink));
+    if s.world.board.is_none() && s.world.in_flight {
+        panel = panel.child(text("Fetching the world's best...").font(small()).color(muted));
+    }
+    let plain = Color::WHITE.alpha(0.1);
+    let mut buttons =
+        row().w_full().gap(8.0).flex_wrap().child(pill("github", "Open on GitHub".into(), plain, |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(mines_rules::submit::LEADERBOARD_PAGE);
+        }));
+    if let Some(run) = &s.last_win {
+        let level = LEVELS.get(run.level as usize).map_or("", |l| l.name);
+        let green = rune::color::hex("#5cf0a0").unwrap_or(Color::WHITE).alpha(0.22);
+        buttons = buttons.child(pill("submit", format!("Submit your {level} win, {}", fmt_ms(run.time_ms())), green, submit_win));
+    }
+    buttons = buttons.child(pill("back", "Back".into(), plain, |s: &mut App, _: &mut Tx| s.open_menu(Menu::Main)));
+    panel.child(levels).child(buttons)
 }
 
 /// Steps the world and draws it into the board's effect slot.
@@ -998,7 +1134,11 @@ impl Compositor<App> for SceneCompositor {
 /// when the frame counter's value changes (checked twice a second).
 fn poll(s: &mut App, _t: f64, _tx: &mut rune::Tx) -> bool {
     let key = s.moving_key();
-    let moving = key != s.shown_key;
+    // the leaderboard on screen is fetched again when due (sooner after a failure)
+    if s.screen == Screen::Menu(Menu::Leaderboard) {
+        s.world.refresh(s.clock);
+    }
+    let moving = key != s.shown_key || s.world.poll();
     s.shown_key = key;
     if s.fps_time < 0.5 {
         return moving;
@@ -1057,6 +1197,50 @@ fn expert_rough_scene(s: &mut App) {
     expert_scene(s);
 }
 
+/// Headless: the world leaderboard screen with a made-up board, after a beginner win.
+fn leaderboard_scene(s: &mut App) {
+    use mines_rules::leaderboard::{Entry, Leaderboard};
+    let mut board = Leaderboard::default();
+    for (k, l) in LEVELS.iter().enumerate() {
+        for i in 0..[12u32, 6, 0][k] {
+            let time_ms = [9_000, 41_000, 0][k] + i * 1_731;
+            let entry = Entry {
+                login: format!("sailor-{i:02}"),
+                time_ms,
+                date: "2026-11-16".into(),
+                version: "0.3.0".into(),
+                issue: i as u64,
+                seed: format!("{k}{i}"),
+            };
+            board.submit(l.key, entry);
+        }
+    }
+    s.world.set(board);
+    win_scene(s);
+    s.records.offer("beginner", 14.2);
+    s.open_menu(Menu::Leaderboard);
+}
+
+/// Headless: a beginner board cleared, the banner offering the leaderboard.
+fn win_scene(s: &mut App) {
+    s.pending = Some((Next::Start(Some("beginner"), LEVELS[0].dims, LEVELS[0].mines), 0.0));
+    s.settle();
+    if let Some(g) = s.game.as_mut() {
+        g.open(g.dims.count() / 2);
+        for c in 0..g.dims.count() {
+            if !g.cells[c].mine && !g.cells[c].open {
+                // two seconds of water between opens, more than the boat takes across the
+                // board, so the leaderboard's verifier takes the run
+                for _ in 0..120 {
+                    g.advance(sea::STEP);
+                }
+                g.open(c);
+            }
+        }
+    }
+    s.watch_end();
+}
+
 fn main() {
     rune::run_with(
         AppSpec::<App> {
@@ -1066,6 +1250,8 @@ fn main() {
                 ("expert", expert_scene),
                 ("expert-calm", expert_calm_scene),
                 ("expert-rough", expert_rough_scene),
+                ("win", win_scene),
+                ("leaderboard", leaderboard_scene),
             ],
             poll: Some(poll),
             on_key: Some(on_key),
@@ -1218,6 +1404,142 @@ mod tests {
         s.press();
         assert_eq!(s.screen, Screen::Menu(Menu::Main));
         assert!(s.game.is_none());
+    }
+
+    /// A won level game leaves a run code behind that the leaderboard's verifier takes: the
+    /// same level, board and moves, timed on the water clock.
+    #[test]
+    fn a_win_on_a_level_leaves_a_run_the_verifier_takes() {
+        let mut s = app();
+        let g = game::tests::play_to_a_win(LEVELS[0].dims, LEVELS[0].mines, 0x5eed, 20_000);
+        let (seed, fingerprint, last) = (g.seed, g.fingerprint(), g.moves.last().map(|m| m.2));
+        s.game = Some(g);
+        s.level = Some("beginner");
+        s.screen = Screen::Game;
+        s.watch_end();
+        let run = s.last_win.clone().expect("a run for the leaderboard");
+        assert_eq!((run.level, run.seed, run.fingerprint), (0, seed, fingerprint));
+        assert_eq!(run.version_text(), env!("CARGO_PKG_VERSION"));
+        let first = s.game.as_ref().and_then(|g| g.moves.first()).map(|m| m.2).unwrap();
+        assert_eq!(run.time_ms() as f64, ((last.unwrap() - first) * 1000.0).round());
+        let v = mines_rules::replay::verify(&run).expect("the verifier takes a played win");
+        assert_eq!(v.level.key, "beginner");
+
+        // a custom game is not ranked
+        let mut s = app();
+        s.game = Some(game::tests::play_to_a_win(LEVELS[0].dims, LEVELS[0].mines, 1, 20_000));
+        s.level = None;
+        s.watch_end();
+        assert!(s.last_win.is_none());
+    }
+
+    /// A runtime over `s` at the default window size, laid out and drawn once.
+    fn runtime(s: App) -> rune::Runtime<App> {
+        let mut rt = rune::Runtime::new(s, view, (1100.0, 860.0), rune::Env::new(false, 1.0));
+        rt.frame(FRAME);
+        rt
+    }
+
+    /// `seconds` of frames: the world steps and the view is built afresh.
+    fn run_rt(rt: &mut rune::Runtime<App>, seconds: f64) {
+        for _ in 0..(seconds / FRAME).round() as usize {
+            let c = rt.state.clock + FRAME;
+            rt.state.update(c, FRAME);
+            // as the app's `poll` does once the banner settles (a test runtime has none)
+            rt.invalidate();
+            rt.frame(FRAME);
+        }
+    }
+
+    fn click_key(rt: &mut rune::Runtime<App>, key: &str) {
+        let ([x, y, w, h], _) = rt.presented(key).unwrap_or_else(|| panic!("no {key} on screen"));
+        let (x, y) = (x + w * 0.5, y + h * 0.5);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.frame(FRAME);
+        rt.pointer_up(x, y);
+        rt.frame(FRAME);
+    }
+
+    /// After a ranked win the banner offers the leaderboard: its button opens the score form,
+    /// filled in with this game's run, and the game stays on screen.
+    #[test]
+    fn the_win_banner_submits_to_the_leaderboard() {
+        let mut s = app();
+        win_scene(&mut s);
+        let mut rt = runtime(s);
+        assert!(rt.presented("submit").is_none(), "not before the banner settles");
+        run_rt(&mut rt, END_HOLD + 0.2);
+        click_key(&mut rt, "submit");
+        let urls = rt.take_url_requests();
+        assert_eq!(urls.len(), 1, "{urls:?}");
+        let run = rt.state.last_win.clone().expect("a run");
+        assert_eq!(urls[0], mines_rules::submit::issue_url(&run));
+        assert!(urls[0].starts_with("https://github.com/pockerhead/rune-minesweeper/issues/new?template=score.yml&"));
+        assert_eq!(rt.state.screen, Screen::Game, "the button is not a click on the sea");
+
+        // a lost game offers nothing
+        let mut s = app();
+        boom_scene(&mut s);
+        let mut rt = runtime(s);
+        run_rt(&mut rt, 4.0);
+        assert_eq!(rt.state.game.as_ref().map(|g| g.status), Some(Status::Lost));
+        assert!(rt.presented("banner").is_some() && rt.presented("submit").is_none());
+    }
+
+    /// A win on a board the leaderboard would not rank (a click clears it) says so on the
+    /// banner and offers no submit; the session's earlier ranked win stays the one to submit.
+    #[test]
+    fn a_win_the_leaderboard_would_not_rank_says_so() {
+        let mut s = app();
+        let earlier = mines_rules::run::Run::from_times(0, [0, 3, 0], 1, 2, &[(game::Kind::Open, 40, 0.0)]);
+        s.last_win = Some(earlier.clone());
+        s.game = Some(game::tests::play_to_a_win(LEVELS[0].dims, LEVELS[0].mines, 16219, 20_000));
+        s.level = Some("beginner");
+        s.screen = Screen::Game;
+        s.watch_end();
+        assert_eq!(s.unranked, Some(Reject::EasyBoard));
+        assert_eq!(s.last_win, Some(earlier));
+        let mut rt = runtime(s);
+        run_rt(&mut rt, END_HOLD + 0.2);
+        assert!(rt.presented("unranked").is_some(), "the banner says why");
+        assert!(rt.presented("submit").is_none(), "and offers no submit");
+    }
+
+    /// Records leads to the world leaderboard: a card over the sea (no tiles) with each
+    /// level's best, a way to GitHub and back. Offline it shows the player's records only.
+    #[test]
+    fn the_world_leaderboard_has_its_screen() {
+        let mut s = app();
+        run(&mut s, 2.0);
+        pick(&mut s, Action::Records);
+        run(&mut s, 2.0);
+        assert_eq!(s.screen, Screen::Menu(Menu::Records));
+        pick(&mut s, Action::Leaderboard);
+        run(&mut s, 2.0);
+        assert_eq!(s.screen, Screen::Menu(Menu::Leaderboard));
+        assert!(s.lobby.tiles.is_empty(), "the card has the buttons");
+
+        // offline: the card, the player's records, no submit without a win
+        let mut rt = runtime(s);
+        assert!(rt.presented("leaderboard").is_some());
+        assert!(rt.presented("submit").is_none());
+        assert!(!rt.state.world.in_flight, "tests never fetch");
+        click_key(&mut rt, "github");
+        assert_eq!(rt.take_url_requests(), [mines_rules::submit::LEADERBOARD_PAGE.to_string()]);
+        click_key(&mut rt, "back");
+        assert_eq!(rt.state.screen, Screen::Menu(Menu::Main));
+
+        // with a board and a win: the card grows a row per entry and offers the win
+        let mut s = app();
+        leaderboard_scene(&mut s);
+        let mut rt = runtime(s);
+        let ([_, _, _, tall], _) = rt.presented("leaderboard").expect("the card");
+        assert!(tall > 300.0, "ten rows of beginners: {tall}");
+        assert!(tall < 700.0, "the card fits the window: {tall}");
+        click_key(&mut rt, "submit");
+        let urls = rt.take_url_requests();
+        assert!(urls.len() == 1 && urls[0].contains("&level=Beginner&"), "{urls:?}");
     }
 
     /// The swell the tiles float on (water.rs) is the one the shaders draw (common.wgsl).
@@ -1777,10 +2099,10 @@ fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
     #[test]
     fn every_menu_fits_the_label_sheet() {
         let s = App::new(0x5eed, Records::default());
-        for menu in [Menu::Main, Menu::Levels, Menu::Custom, Menu::Records] {
+        for menu in [Menu::Main, Menu::Levels, Menu::Custom, Menu::Records, Menu::Leaderboard] {
             // a new menu must join the list above before this compiles again
             match menu {
-                Menu::Main | Menu::Levels | Menu::Custom | Menu::Records => {}
+                Menu::Main | Menu::Levels | Menu::Custom | Menu::Records | Menu::Leaderboard => {}
             }
             let items = s.menu_items(menu).len();
             assert!(items <= labels::ROWS, "{menu:?} has {items} tiles, the sheet {} rows", labels::ROWS);

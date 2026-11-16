@@ -24,3 +24,7 @@ jobs:
       # the rules, the water, the boat and the menu world are plain CPU code; the one GPU test
       # (labels reach the planks) runs on Mesa's software Vulkan (lavapipe)
       - run: cargo test --locked
+      # the rules crate (run codes, replay, leaderboard) is a workspace of its own, built by the
+      # leaderboard workflow without the game's GPU and physics crates; its tests also run the
+      # workflow's script (.github/scripts/leaderboard.sh) against a stand-in gh
+      - run: cargo test --locked --manifest-path rules/Cargo.toml

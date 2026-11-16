@@ -1,0 +1,105 @@
+name: leaderboard
+
+# Checks leaderboard submissions: issues opened from the score form (.github/ISSUE_TEMPLATE/
+# score.yml, label `score`). Each open submission is replayed with the game's rules (the
+# `mines-rules` crate's verify-score, which builds without the game's GPU and physics crates);
+# a ranked win updates leaderboard/leaderboard.json and the README's tables on main; every
+# submission gets a comment and is closed with `score-accepted` or `score-rejected`.
+#
+# The issue is untrusted input: nothing of it is put into a script here. The script asks the
+# API for each issue and hands the JSON to verify-score as a file; comments and commit
+# messages are made only from what the replay verified.
+#
+# Three jobs: `pending` (is there anything to check), `build` (compiles the verifier with a
+# read-only token, so no third-party build script runs next to a write token) and `record`
+# (runs the prebuilt verifier and the script, and alone can write). The hourly sweep and a
+# manual run pick up any submission a failed or replaced run left open.
+
+on:
+  issues:
+    types: [opened, edited]
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pending:
+    # an issue event counts only for an open score issue: any other issue starts nothing
+    if: github.event_name != 'issues' || (github.event.issue.state == 'open' && contains(github.event.issue.labels.*.name, 'score'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      issues: read
+    outputs:
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: echo "count=$(gh issue list --repo "$REPO" --label score --state open --limit 1 --json number --jq length)" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: pending
+    if: needs.pending.outputs.count != '0'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Build the verifier
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo +stable build --release --locked --manifest-path rules/Cargo.toml --bin verify-score
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verify-score
+          path: rules/target/release/verify-score
+          retention-days: 1
+
+  record:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    # One at a time, so two runs never race the JSON. The group is on this job, which only runs
+    # for a score issue or the sweep: an unrelated issue's run never takes a waiting run's
+    # place. A waiting run replaced by a newer one loses nothing, since each run checks every
+    # open submission.
+    concurrency:
+      group: leaderboard-record
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verify-score
+          path: ${{ runner.temp }}/verifier
+
+      # the token reaches git only inside the script's push (an http header from the
+      # environment), never .git/config
+      - name: Check the open submissions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERIFY: ${{ runner.temp }}/verifier/verify-score
+        run: |
+          chmod +x "$VERIFY"
+          bash .github/scripts/leaderboard.sh
