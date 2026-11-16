@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -145,6 +147,7 @@ pub struct Gpu {
     water_mesh: Mesh,
     target: Option<Target>,
     res: Resolution,
+    pace: GpuPace,
 }
 
 /// Dynamic resolution: the scene renders at `scale` device pixels per frame pixel and the blit
@@ -159,7 +162,65 @@ struct Resolution {
     since: f32,
 }
 
-const MIN_SCALE: f32 = 0.35;
+/// Frames the GPU has really finished, counted from the queue's work-done callbacks.
+///
+/// In a browser the page can hand WebGPU frames faster than the GPU draws them (Safari on a
+/// phone: 30 to 60 a second handed over, a handful drawn); the gap between frames then says
+/// nothing about how the GPU copes, but these callbacks do. Native windows wait for the GPU
+/// at present, so their frame gaps already tell the truth and this stays off there.
+struct GpuPace {
+    done: Arc<AtomicU32>,
+    /// `done` and the time at the last measurement.
+    seen: (u32, f64),
+    /// Seconds per finished frame over the last window, and finished frames not yet reported.
+    frame: f32,
+    unreported: u32,
+}
+
+fn now_seconds() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() / 1000.0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    }
+}
+
+impl GpuPace {
+    fn new() -> GpuPace {
+        GpuPace { done: Arc::new(AtomicU32::new(0)), seen: (0, now_seconds()), frame: 1.0 / 60.0, unreported: 0 }
+    }
+
+    /// Asks to be told when what has been submitted so far is done, and every quarter second
+    /// turns the count of finished frames into seconds per frame.
+    fn track(&mut self, queue: &wgpu::Queue) {
+        let done = self.done.clone();
+        queue.on_submitted_work_done(move || {
+            done.fetch_add(1, Ordering::Relaxed);
+        });
+        let (now, count) = (now_seconds(), self.done.load(Ordering::Relaxed));
+        let (count0, at0) = self.seen;
+        if now - at0 >= 0.25 {
+            let finished = count.wrapping_sub(count0);
+            // none finished in the window: the GPU is at least that far behind
+            self.frame = ((now - at0) / finished.max(1) as f64) as f32;
+            self.unreported += finished;
+            self.seen = (count, now);
+        }
+    }
+
+    /// Finished frames since the last call, for the frame counter.
+    fn take_finished(&mut self) -> u32 {
+        std::mem::take(&mut self.unreported)
+    }
+}
+
+/// The lowest render scale: in a browser down to a quarter of native resolution (a phone's
+/// screen is dense enough for it), in a native window a third.
+const MIN_SCALE: f32 = if cfg!(target_arch = "wasm32") { 0.25 } else { 0.35 };
 /// Frame times that make the scale drop or rise (about 45 and 56 frames a second).
 const SLOW_FRAME: f32 = 1.0 / 45.0;
 const FAST_FRAME: f32 = 1.0 / 56.0;
@@ -591,7 +652,14 @@ impl Gpu {
             target: None,
             sampler,
             res: Resolution::new(),
+            pace: GpuPace::new(),
         }
+    }
+
+    /// Frames the GPU finished since the last call, in a browser; None in a native window,
+    /// whose frames are finished when they are presented.
+    pub fn finished_frames(&mut self) -> Option<u32> {
+        cfg!(target_arch = "wasm32").then(|| self.pace.take_finished())
     }
 
     pub fn key(&self) -> DeviceKey {
@@ -677,7 +745,13 @@ impl Gpu {
         // the target is sized for full quality; a lower scale uses its top-left part
         let full = supersample(f.size, device.limits().max_texture_dimension_2d);
         let size = (f.size.0 * full, f.size.1 * full);
-        let ss = self.res.step(f.dt as f32, full as f32);
+        // the slower of the frame gaps and the GPU's own pace (browsers only, see `GpuPace`)
+        let mut frame = f.dt as f32;
+        if cfg!(target_arch = "wasm32") {
+            self.pace.track(queue);
+            frame = frame.max(self.pace.frame);
+        }
+        let ss = self.res.step(frame, full as f32);
         self.ensure_target(device, size);
         self.ensure_blit(device, f.format);
         self.ensure_blit(device, HDR);

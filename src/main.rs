@@ -281,10 +281,12 @@ impl App {
         self.hover = hover;
     }
 
-    /// Down, move and up of any press on the board, mouse or touch: the press is aimed where it
-    /// went down (a touch has no hover before it), and a still one turns into a flag.
+    /// Down, move and up of any press on the board, mouse or touch. The press is aimed where it
+    /// went down (a touch has no hover before it). Released where it went down it is a click;
+    /// held still for `LONG_PRESS` it plants a flag instead (touch screens have no right button).
     fn drag(&mut self, d: &Drag) {
         let [x, y] = d.window_point();
+        self.pointer_moved(Some(PointerPress { x, y }));
         match d.phase {
             Phase::Down => {
                 self.held = Some((self.clock, (x, y)));
@@ -295,9 +297,13 @@ impl App {
                     self.held = None;
                 }
             }
-            Phase::Up => self.held = None,
+            Phase::Up => {
+                let still = self.held.take().is_some();
+                if still && !d.cancelled() && !std::mem::take(&mut self.held_flagged) {
+                    self.press();
+                }
+            }
         }
-        self.pointer_moved(Some(PointerPress { x, y }));
     }
 
     /// A press held still for `LONG_PRESS` plants a flag, once.
@@ -312,9 +318,6 @@ impl App {
     }
 
     fn press(&mut self) {
-        if std::mem::take(&mut self.held_flagged) {
-            return;
-        }
         match self.screen {
             Screen::Game => {
                 let Some(g) = self.game.as_mut() else { return };
@@ -448,7 +451,7 @@ impl App {
         self.watch_hold();
         self.watch_end();
         self.settle();
-        self.fps_frames += 1;
+        self.fps_frames += 1; // a browser replaces this with the GPU's finished frames
         self.fps_time += dt;
     }
 
@@ -530,8 +533,11 @@ fn view(s: &App, _: &mut Cx<App>) -> El {
                 s.pointer_moved(None);
             }
         })
+        // presses come through `drag` (down, hold, up): a finger is aimed where it lands and
+        // can be held for a flag; `touch_drags_at_once` hands it over without the page's own
+        // long-press and slop
         .on_drag(|s: &mut App, d: &mut Drag, _| s.drag(d))
-        .on_press(|s: &mut App| s.press())
+        .touch_drags_at_once()
         .on_secondary_press(|s: &mut App, p: PointerPress, _| s.secondary_press(p));
 
     match (s.screen, &s.game) {
@@ -620,6 +626,11 @@ impl Compositor<App> for SceneCompositor {
         }
         let gpu = self.gpu.as_mut().expect("gpu");
         gpu.render(f, &scene, viewport);
+        // in a browser count the frames the GPU finished, not the ones handed to it
+        if let Some(finished) = gpu.finished_frames() {
+            let s = &mut f.rt.state;
+            s.fps_frames = s.fps_frames.saturating_sub(1) + finished;
+        }
 
         let clear = f.rt.clear_color();
         f.ui.prepare(f.device, f.queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);

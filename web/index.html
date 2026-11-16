@@ -8,6 +8,8 @@
 <meta name="description" content="Minesweeper on a living sea. A native Rust game on the Rune GPU UI framework with Jolt Physics, running in your browser on WebGPU.">
 <style>
   html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; overscroll-behavior: none; touch-action: none; background: #0b1419; }
+  /* a held finger is a flag in the game, not a text selection or the iOS callout */
+  html, body, canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
   #status { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
             font: 15px/1.5 system-ui, sans-serif; color: #cfe3e8; text-align: center; padding: 24px; box-sizing: border-box; }
   #status h1 { margin: 0; font-size: 26px; font-weight: 700; color: #fff; }
