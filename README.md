@@ -3,6 +3,7 @@
 [![CI](https://github.com/pockerhead/rune-minesweeper/actions/workflows/ci.yml/badge.svg)](https://github.com/pockerhead/rune-minesweeper/actions/workflows/ci.yml)
 [![Pages](https://github.com/pockerhead/rune-minesweeper/actions/workflows/pages.yml/badge.svg)](https://pockerhead.github.io/rune-minesweeper/)
 [![Release](https://img.shields.io/github/v/release/pockerhead/rune-minesweeper)](https://github.com/pockerhead/rune-minesweeper/releases/latest)
+[![Visits](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpockerhead.goatcounter.com%2Fcounter%2FTOTAL.json&query=%24.count&label=visits&color=0e7490)](https://pockerhead.goatcounter.com/)
 [![Downloads](https://img.shields.io/github/downloads/pockerhead/rune-minesweeper/total)](https://github.com/pockerhead/rune-minesweeper/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Play in the browser](https://img.shields.io/badge/play-WebGPU-2ea44f)](https://pockerhead.github.io/rune-minesweeper/)
