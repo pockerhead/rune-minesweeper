@@ -102,6 +102,13 @@ fn vnoise(p: vec3<f32>) -> f32 {
 
 // signed distance to cloud k at world point p (approximate: bumps make it non-Euclidean, so
 // marching steps are scaled down by the callers)
+// The cheapest render quality (phones, a struggling GPU): every cloud costs in every pixel of
+// water and tile it could shade, so their shadows, reflections and fine curls go, and a long
+// game with many clouds stays as light as the first move.
+fn lite() -> bool {
+    return g.sim.w <= 0.0;
+}
+
 fn cloud_sdf(p: vec3<f32>, k: i32, frame: mat3x3<f32>) -> f32 {
     let size = max(cloud_size(k), 0.02);
     let scale = GLYPH_H * size;
@@ -112,8 +119,11 @@ fn cloud_sdf(p: vec3<f32>, k: i32, frame: mat3x3<f32>) -> f32 {
     // ...made puffy: big soft lumps plus small curls, slowly churning
     let t = g.cam.w * 0.25;
     let lumps = vnoise(q * 5.0 + vec3<f32>(t, 0.0, t * 0.7));
-    let curls = vnoise(q * 11.0 - vec3<f32>(0.0, t * 1.3, 0.0));
-    d -= (lumps - 0.45) * 0.075 + (curls - 0.5) * 0.035;
+    d -= (lumps - 0.45) * 0.075;
+    if (!lite()) {
+        let curls = vnoise(q * 11.0 - vec3<f32>(0.0, t * 1.3, 0.0));
+        d -= (curls - 0.5) * 0.035;
+    }
     return d * scale;
 }
 
@@ -192,6 +202,7 @@ fn walk_next(w: ptr<function, Walk>) -> f32 {
 
 // soft shadow of the clouds at p toward the sun: 1 lit, 0 fully shaded
 fn cloud_shadow(p: vec3<f32>, l: vec3<f32>) -> f32 {
+    if (lite()) { return 1.0; }
     let span = slab_span(p, l);
     if (span.y <= span.x) { return 1.0; }
     let frame = glyph_frame();
@@ -272,7 +283,7 @@ fn cloud_shade(p: vec3<f32>, k: i32, v: vec3<f32>, full: bool) -> vec3<f32> {
     let wrap = pow(clamp(dot(n, l) * 0.5 + 0.5, 0.0, 1.0), 1.6);
     var shade = 1.0;
     var ao = 1.0;
-    if (full) {
+    if (full && !lite()) {
         // occlusion from the curls around it, and self-shadow toward the sun
         ao = clamp(0.35 + 0.65 * (cloud_sdf(p + n * 0.05, k, frame) / 0.05), 0.25, 1.0);
         var t = 0.03;

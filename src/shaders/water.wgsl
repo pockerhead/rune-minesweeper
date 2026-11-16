@@ -134,7 +134,10 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     // cursor light (screen space) and the number clouds (ray-traced)
     let rn = normalize(r);
     var mirror = ssr(i.world, rn);
-    let mirrored = cloud_hit(i.world, rn, i32(mix(f32(CLOUD_REFLECT_STEPS) * 0.45, f32(CLOUD_REFLECT_STEPS), g.sim.w)));
+    var mirrored = vec2<f32>(-1.0, -1.0);
+    if (!lite()) {
+        mirrored = cloud_hit(i.world, rn, i32(mix(f32(CLOUD_REFLECT_STEPS) * 0.45, f32(CLOUD_REFLECT_STEPS), g.sim.w)));
+    }
     if (mirrored.x > 0.0) {
         mirror = vec4<f32>(cloud_shade(i.world + rn * mirrored.x, i32(mirrored.y), -rn, false), 1.0);
     }
